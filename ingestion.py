@@ -8,10 +8,11 @@ import base64
 import requests
 import webbrowser
 import csv
+import pickle
 from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class Ingestor:
@@ -22,6 +23,7 @@ class Ingestor:
     def __init__(self):
         self.watchlist_path = Path("watchlists")
         self.ticker_list = set()
+        self.api = SchwabAPIClient()
 
     def mergefiles(
         self,
@@ -29,24 +31,10 @@ class Ingestor:
         """
         loops though all the files in self.watchlist_path and
         """
-
         today = datetime.today().strftime("%Y-%m-%d")
-        print(today)
-        headers = [
-            "",
-            "symbol",
-            "Watchlist '1 month gainer - KK'",
-            "1 month gainer - KK",
-            "Watchlist '3 month gainers - KK'",
-            "3 month gainers - KK",
-            "Watchlist '6 month gainers - KK'",
-            "6 month gainers - KK",
-        ]
 
         # loop through files in watchlist directory
         for file in os.listdir(self.watchlist_path):
-            # print("file: ", file)
-
             # check for today's watchlist exports
             if file.startswith(today):
                 with open(self.watchlist_path / file, "r") as f:
@@ -59,8 +47,28 @@ class Ingestor:
                     # add row to ticker list set
                     for row in csv_reader:
                         self.ticker_list.add(row[0])
+        return
 
-        print(self.ticker_list)
+    def get_data(self):
+        if len(self.ticker_list) == 0:
+            raise ValueError("ticker list not intialized")
+
+        end_dt = datetime.today()
+        start_dt = end_dt - timedelta(days=365)
+
+        end_dt = int(end_dt.timestamp() * 1000)
+        start_dt = int(start_dt.timestamp() * 1000)
+
+        for ticker in self.ticker_list:
+            self.api.get_historical_prices(
+                symbol=ticker,
+                periodType="year",
+                frequencyType="daily",
+                frequency=1,
+                startDate=start_dt,
+                endDate=end_dt,
+                needExtendedHoursData=False,
+            )
 
 
 class SchwabAPIClient:
@@ -186,6 +194,17 @@ class SchwabAPIClient:
         needExtendedHoursData=False,
         needPreviousClose=False,
     ):
+        end = datetime.today()
+        start = end - timedelta(days=365)
+        end = end.strftime("%Y-%m-%d")
+        start = start.strftime("%Y-%m-%d")
+
+        print(end, start)
+        path = f"data/{symbol}-{str(end).rstrip()}_{str(start).rstrip()}.pkl"
+
+        if os.path.exists(path):
+            return
+
         access_token = self.get_access_token()
         headers = {"Authorization": f"Bearer {access_token}"}
         url = f"{self.base_url_market_data}/pricehistory"
@@ -205,15 +224,14 @@ class SchwabAPIClient:
         if endDate:
             params["endDate"] = int(endDate)
 
-        resp = requests.get(url, headers=headers, params=params)
+        res = requests.get(url, headers=headers, params=params)
+        data = res.json()
 
-        try:
-            data = resp.json()
-            if "candles" in resp.json():
-                df = pd.DataFrame(data["candles"])
-                return df
-            else:
-                return pd.DataFrame()
+        if "candles" not in data:
+            print(f"no data from {symbol}")
+            return
 
-        except Exception:
-            return pd.DataFrame()
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+
+        print(f"{symbol} data saved")
