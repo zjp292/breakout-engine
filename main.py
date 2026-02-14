@@ -1,11 +1,11 @@
 from ingestion import Ingestor, SchwabAPIClient
 import pickle
+from datetime import datetime
+
+
+print("test: ", datetime.today().strftime("%Y-%m-%d"))
 
 # init objects
 ig = Ingestor()
 ig.mergefiles()
 ig.get_data()
-
-with open('data/UAMY-2026-02-14.pkl', 'rb') as f:
-    data = pickle.load(f)
-    print(data)

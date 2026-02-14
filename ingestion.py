@@ -55,16 +55,18 @@ class Ingestor:
         if len(self.ticker_list) == 0:
             raise ValueError("ticker list not intialized")
 
+        today = datetime.today().strftime("%Y-%m-%d")
         end_dt = datetime.today()
         start_dt = end_dt - timedelta(days=365)
-        print('look: ', end_dt, start_dt)
         end_dt = int(end_dt.timestamp() * 1000)
         start_dt = int(start_dt.timestamp() * 1000)
 
-
+        data_dir = f"data/{today.rstrip()}"
+        os.makedirs(data_dir, exist_ok=True)
 
         for ticker in self.ticker_list:
             self.api.get_historical_prices(
+                data_dir=data_dir,
                 symbol=ticker,
                 periodType="year",
                 frequencyType="daily",
@@ -188,6 +190,7 @@ class SchwabAPIClient:
 
     def get_historical_prices(
         self,
+        data_dir,
         symbol,
         periodType="month",
         period=1,
@@ -203,7 +206,7 @@ class SchwabAPIClient:
         end = end.strftime("%Y-%m-%d")
         start = start.strftime("%Y-%m-%d")
 
-        path = f"data/{symbol}-{str(end).rstrip()}.pkl"
+        path = f"{data_dir}/{symbol}-{str(end).rstrip()}.pkl"
 
         if os.path.exists(path):
             return
@@ -232,8 +235,8 @@ class SchwabAPIClient:
 
         if "candles" in res.json():
             df = pd.DataFrame(data["candles"])
-            
-            with open(path, "wb") as f:
+
+            with open(path, "rb") as f:
                 pickle.dump(df, f)
             print(f"{symbol} data saved")
             return
@@ -241,5 +244,3 @@ class SchwabAPIClient:
         else:
             print(f"no data from {symbol}")
             return
-
-
