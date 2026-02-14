@@ -46,6 +46,8 @@ class Ingestor:
 
                     # add row to ticker list set
                     for row in csv_reader:
+                        if any(not row[0].isalnum() for c in row[0]):
+                            continue
                         self.ticker_list.add(row[0])
         return
 
@@ -55,9 +57,11 @@ class Ingestor:
 
         end_dt = datetime.today()
         start_dt = end_dt - timedelta(days=365)
-
+        print('look: ', end_dt, start_dt)
         end_dt = int(end_dt.timestamp() * 1000)
         start_dt = int(start_dt.timestamp() * 1000)
+
+
 
         for ticker in self.ticker_list:
             self.api.get_historical_prices(
@@ -199,8 +203,7 @@ class SchwabAPIClient:
         end = end.strftime("%Y-%m-%d")
         start = start.strftime("%Y-%m-%d")
 
-        print(end, start)
-        path = f"data/{symbol}-{str(end).rstrip()}_{str(start).rstrip()}.pkl"
+        path = f"data/{symbol}-{str(end).rstrip()}.pkl"
 
         if os.path.exists(path):
             return
@@ -227,11 +230,16 @@ class SchwabAPIClient:
         res = requests.get(url, headers=headers, params=params)
         data = res.json()
 
-        if "candles" not in data:
+        if "candles" in res.json():
+            df = pd.DataFrame(data["candles"])
+            
+            with open(path, "wb") as f:
+                pickle.dump(df, f)
+            print(f"{symbol} data saved")
+            return
+
+        else:
             print(f"no data from {symbol}")
             return
 
-        with open(path, "wb") as f:
-            pickle.dump(data, f)
 
-        print(f"{symbol} data saved")
