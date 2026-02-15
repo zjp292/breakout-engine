@@ -9,7 +9,7 @@ class Engine:
 
     def load_pickle(self, file):
         with open(file, "rb") as f:
-            return pickle.load(file)
+            return pickle.load(f)
 
     def create_features(self):
         pass
