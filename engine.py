@@ -23,17 +23,31 @@ class Features:
         self.config = config
 
     def add_moving_averages(self, df):
-        df["sma_10"] = df["close"].rolling(10).mean()
-        df["sma_20"] = df["close"].rolling(20).mean()
-        df["sma_50"] = df["close"].rolling(50).mean()
-        df["sma_200"] = df["close"].rolling(200).mean()
+        periods = self.config.get("sma_periods", [10, 20, 50])
+
+        for period in periods:
+            df[f"sma_{period}"] = df["close"].rolling(window=period).mean()
+
+        return df
 
     def add_ma_relationships(self, df):
-        df["dist_from_sma10"] = (df["close"] - df["sma_10"]) / df["sma_10"]
-        df["dist_from_sma20"] = (df["close"] - df["sma_20"]) / df["sma_20"]
+        df["distance_from_sma10"] = (df["close"] - df["sma_10"]) / df["sma_10"]
+        df["distance_from_sma20"] = (df["close"] - df["sma_20"]) / df["sma_20"]
+        df["distance_from_sma50"] = (df["close"] - df["sma_50"]) / df["sma_50"]
 
-        df["ma_aligned"] = (df["sma_10"] > df["sma_20"]) & (df["sma_20"] > df["sma_50"])
-        df["sma_10_slope"] = (df["sma_10"] - df["sma_10"].shift(5)) / 5
+        df["ma_alignment"] = (df["sma_10"] > df["sma_20"]) & (
+            df["sma_20"] > df["sma_50"]
+        )
+
+        df["ma_slope_10"] = df["sma_10"].pct_change(periods=5)
+        df["ma_slope_20"] = df["sma_20"].pct_change(periods=5)
+        df["ma_slope_50"] = df["sma_50"].pct_change(periods=5)
+
+        df["mas_rising"] = (
+            (df["ma_slope_10"] > 0) & (df["ma_slope_20"] > 0) & (df["ma_slope_50"] > 0)
+        )
+
+        return df
 
     def add_atr(self, df):
         period = self.config["atr_period"]
@@ -45,10 +59,18 @@ class Features:
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df[f"atr_{period}"] = true_range.rolling(window=period).mean()
 
+        return df
+
     def add_range_metrics(self, df):
         # daily range percent
+        df["daily_range"] = df["high"] - df["low"]
+        df["daily_range_pct"] = df["daily_range"] / df["close"]
+
         # adr_pct
-        pass
+        adr_period = self.config.get("adr_period", 20)
+        df["adr_pct"] = df["daily_range_pct"].rolling(window=adr_period).mean()
+
+        return df
 
     def add_volume_metrics(self, df):
         # vol 20 sma
