@@ -24,6 +24,7 @@ class Ingestor:
         self.watchlist_path = Path("watchlists")
         self.ticker_list = set()
         self.api = SchwabAPIClient()
+        # self.api.initial_auth_flow()
 
     def mergefiles(
         self,
@@ -236,7 +237,7 @@ class SchwabAPIClient:
         if "candles" in res.json():
             df = pd.DataFrame(data["candles"])
 
-            with open(path, "rb") as f:
+            with open(path, "wb") as f:
                 pickle.dump(df, f)
             print(f"{symbol} data saved")
             return
