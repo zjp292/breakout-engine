@@ -73,11 +73,30 @@ class Features:
         return df
 
     def add_volume_metrics(self, df):
-        # vol 20 sma
-        # relative volume
-        # dollar volume
-        # volume trend
-        pass
+        volume_period = self.config.get("volume_avg_period", 20)
+
+        df["volume_sma_20"] = df["volume"].rolling(window=volume_period).mean()
+        df["relative_volume"] = df["volume"] / df["volume_sma_20"]
+        df["dollar_volume"] = df["close"] * df["volume"]
+
+        def calculate_slope(series):
+            if len(series) < 2:
+                return 0
+
+            x = np.arange(len(series))
+            y = series.values
+
+            if np.all(y == y[0]):
+                return 0
+
+            slope = np.polyfit(x, y, 1)[0]
+            return slope
+
+        df["volume_trend"] = (
+            df["volume"].rolling(window=10).apply(calculate_slope, raw=False)
+        )
+
+        return df
 
     def detect_volume_drying(self, df, lookback):
         # vol declining
