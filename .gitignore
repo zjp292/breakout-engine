@@ -1,3 +1,4 @@
 .env
 schwab_tokens.json
 data/
+__pycache__

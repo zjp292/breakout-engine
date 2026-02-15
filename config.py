@@ -7,6 +7,8 @@ PARAMETERS = {
     # moving averages
     "sma_periods": [10, 20, 50],
     "ma_distance_optimal": 0.03,
+    # volatility
+    "atr_period": 20,
     # volume
     "volume_avg_period": 20,
     "volume_surge_multiplier": 1.5,

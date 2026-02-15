@@ -1,5 +1,6 @@
 import pickle
 import pandas as pd
+import numpy as np
 
 
 class Engine:
@@ -34,6 +35,17 @@ class Features:
         df["ma_aligned"] = (df["sma_10"] > df["sma_20"]) & (df["sma_20"] > df["sma_50"])
         df["sma_10_slope"] = (df["sma_10"] - df["sma_10"].shift(5)) / 5
 
+    def add_atr(self, df):
+        period = self.config["atr_period"]
+
+        high_low = df["high"] - df["low"]
+        high_close = np.abs(df["high"] - df["close"].shift())
+        low_close = np.abs(df["low"] - df["close"].shift())
+
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df[f"atr_{period}"] = true_range.rolling(window=period).mean()
+
     def add_all_features(self, df):
         self.add_moving_averages(df)
         self.add_ma_relationships(df)
+        self.add_atr(df)
