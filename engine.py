@@ -45,6 +45,47 @@ class Features:
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df[f"atr_{period}"] = true_range.rolling(window=period).mean()
 
+    def add_volume_metrics(self, df):
+        pass
+
+    def detect_volume_drying(self, df):
+        pass
+
+    def add_range_metrics(self, df):
+        pass
+
+    # TODO - lookback in config??
+    def detect_consolidation_range(self, df, lookback):
+        pass
+
+    def calculate_base_depth(self, df, lookback):
+        pass
+
+    # TODO - might need to change this to nasdaq comp df??
+    def calculate_relative_strength(self, df, spy_df):
+        pass
+
+    # TODO - i want to calc rs based on both the market as a whole but especially against its peers
+    def calculate_rs_rank(self, symbol):
+        pass
+
+    # big move up before consolidation
+    def detect_prior_moves(self, df, lookback):
+        pass
+
+    def calculate_higher_lows(self, df, lookback):
+        pass
+
+    """
+    risk management stuff
+    """
+
+    def calculate_stop(self, df):
+        pass
+
+    def calculate_rr(self, df):
+        pass
+
     def add_all_features(self, df):
         self.add_moving_averages(df)
         self.add_ma_relationships(df)
