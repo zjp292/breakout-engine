@@ -99,20 +99,66 @@ class Features:
         return df
 
     def detect_volume_drying(self, df, lookback):
-        # vol declining
-        # vol dryup ratio? TODO - look this up
-        pass
+        # recent volume average
+        recent_vol = df["volume"].rolling(window=lookback).mean()
 
-    # TODO - lookback in config??
+        # baseline vol avg
+        baseline_vol = df["volume"].rolling(window=20).mean().shift(lookback)
+
+        df["volume_dryup_ratio"] = recent_vol / baseline_vol
+
+        # volume is declining if ratio < 1 and trend is negative
+        df["volume_declining"] = (df["volume_dryup_ratio"] < 1.0) & (
+            df["volume_trend"] < 0
+        )
+
+        return df
+
     def detect_consolidation_range(self, df, lookback):
-        # consol_range =  (max_high - min_low) / close over lookback period
-        # consol_days = consecutive days in tight range
-        pass
+        if lookback is None:
+            lookback = self.config.get("base_length_max", 15)
+
+        # Calculate range over rolling window
+        rolling_high = df["high"].rolling(window=lookback).max()
+        rolling_low = df["low"].rolling(window=lookback).min()
+
+        df[f"consol_range_{lookback}"] = (rolling_high - rolling_low) / df["close"]
+
+        # Detect tight consolidation (range < threshold)
+        tight_threshold = self.config.get("range_compression_threshold", 0.05)
+        df["is_tight_consolidation"] = df[f"consol_range_{lookback}"] < tight_threshold
+
+        # tight range
+        df["consol_days"] = (
+            df["is_tight_consolidation"]
+            .groupby(
+                (
+                    df["is_tight_consolidation"] != df["is_tight_consolidation"].shift()
+                ).cumsum()  # rock_eyebrow.png
+            )
+            .cumsum()
+        )
+
+        # only keep count if currently in consolidation
+        df.loc[~df["is_tight_consolidation"], "consol_days"] = 0
+
+        return df
 
     def calculate_base_depth(self, df, lookback):
         # base_depth: (recent_high - current_close) / recent_high
         # days_from_high: days since recent high
-        pass
+        rolling_high = df["high"].rolling(window=lookback).max()
+        df["base_depth"] = (rolling_high - df["close"]) / rolling_high
+
+        # Days since high
+        high_idx = (
+            df["high"]
+            .rolling(window=lookback)
+            .apply(lambda x: lookback - x.argmax() - 1, raw=True)
+        )
+        df["days_from_high"] = high_idx
+
+        return df
 
     # TODO - might need to change this to nasdaq comp df??
     def calculate_relative_strength(self, df, spy_df):
@@ -131,11 +177,50 @@ class Features:
     def detect_prior_moves(self, df, lookback):
         # prior_move_pct: max % gain in lookback period
         # days_since_power_move: days since 20%+ move
-        pass
+        rolling_low = df["low"].rolling(window=lookback).min()
+        df["prior_move_pct"] = (df["close"] - rolling_low) / rolling_low
+
+        # Detect power moves (20%+ gains)
+        power_move_threshold = 0.20
+        df["is_power_move"] = df["prior_move_pct"] >= power_move_threshold
+
+        # Days since last power move
+        def days_since_true(series):
+            """Count days since last True value"""
+            last_true_idx = np.where(series)[0]
+            if len(last_true_idx) == 0:
+                return len(series)
+            return len(series) - last_true_idx[-1] - 1
+
+        df["days_since_power_move"] = (
+            df["is_power_move"]
+            .rolling(window=lookback)
+            .apply(days_since_true, raw=True)
+        )
+
+        return df
 
     def calculate_higher_lows(self, df, lookback):
         # higher_lows: boolean indicating uptrend structure
-        pass
+        # Find local lows (price lower than neighbors)
+        df["is_swing_low"] = (df["low"] < df["low"].shift(1)) & (
+            df["low"] < df["low"].shift(-1)
+        )
+
+        # Get swing low values
+        swing_lows = df["low"].where(df["is_swing_low"])
+
+        # Check if swing lows are rising
+        # Compare current swing low to previous swing low
+        last_swing_low = swing_lows.ffill()
+        prev_swing_low = last_swing_low.shift(1)
+
+        df["higher_lows"] = last_swing_low > prev_swing_low
+
+        # Count higher lows in lookback period
+        df["swing_low_count"] = df["higher_lows"].rolling(window=lookback).sum()
+
+        return df
 
     """
     risk management stuff
@@ -148,6 +233,9 @@ class Features:
         pass
 
     def add_all_features(self, df):
-        self.add_moving_averages(df)
-        self.add_ma_relationships(df)
-        self.add_atr(df)
+        df = df.copy()
+
+        df = self.add_moving_averages(df)
+        df = self.add_atr(df)
+        df = self.add_range_metrics(df)
+        df = self.add_volume_metrics(df)
