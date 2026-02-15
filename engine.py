@@ -45,35 +45,55 @@ class Features:
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df[f"atr_{period}"] = true_range.rolling(window=period).mean()
 
-    def add_volume_metrics(self, df):
-        pass
-
-    def detect_volume_drying(self, df):
-        pass
-
     def add_range_metrics(self, df):
+        # daily range percent
+        # adr_pct
+        pass
+
+    def add_volume_metrics(self, df):
+        # vol 20 sma
+        # relative volume
+        # dollar volume
+        # volume trend
+        pass
+
+    def detect_volume_drying(self, df, lookback):
+        # vol declining
+        # vol dryup ratio? TODO - look this up
         pass
 
     # TODO - lookback in config??
     def detect_consolidation_range(self, df, lookback):
+        # consol_range =  (max_high - min_low) / close over lookback period
+        # consol_days = consecutive days in tight range
         pass
 
     def calculate_base_depth(self, df, lookback):
+        # base_depth: (recent_high - current_close) / recent_high
+        # days_from_high: days since recent high
         pass
 
     # TODO - might need to change this to nasdaq comp df??
     def calculate_relative_strength(self, df, spy_df):
+
+        # rs_spy_20: % change stock vs % change SPY (20 days)
+        # rs_spy_60: % change stock vs % change SPY (60 days)
+        # rs_spy_120: % change stock vs % change SPY (120 days)
         pass
 
     # TODO - i want to calc rs based on both the market as a whole but especially against its peers
     def calculate_rs_rank(self, symbol):
+        # calculate percentile rank of this stock vs entire watchlist.
         pass
 
     # big move up before consolidation
     def detect_prior_moves(self, df, lookback):
+        # prior_move_pct: max % gain in lookback period
+        # days_since_power_move: days since 20%+ move
         pass
 
     def calculate_higher_lows(self, df, lookback):
+        # higher_lows: boolean indicating uptrend structure
         pass
 
     """
