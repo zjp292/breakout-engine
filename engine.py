@@ -1,22 +1,157 @@
 import pickle
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from models import ScoreBreakdown
+from datetime import datetime
 
 
 class Engine:
     def __init__(self, config):
         self.config = config
         self.features = Features(config)
+        self.scoring = Scoring(config)
+        self.benchmark_df = None
+
+    def load_benchmark(self, benchmark_file):
+        """
+        Load benchmark data (SPY or QQQ) for relative strength calculations.
+
+        Args:
+            benchmark_file: Path to benchmark pickle file
+        """
+        try:
+            self.benchmark_df = self.load_pickle(benchmark_file)
+            print(f"✓ Loaded benchmark data from {benchmark_file}")
+        except Exception as e:
+            print(f"⚠ Could not load benchmark: {e}")
+            self.benchmark_df = None
 
     def load_pickle(self, file):
         with open(file, "rb") as f:
             return pickle.load(f)
 
-    def process_stock(self):
-        df = self.load_pickle("data/2026-02-14/AAOI-2026-02-14.pkl")
-        feature_df = self.features.add_all_features(df)
-        print(feature_df)
+    def process_stock(self, date_str=None, debug=False):
+        if date_str == None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        data_dir = Path(f"data/{date_str}")
+
+        # Check if directory exists
+        if not data_dir.exists():
+            print(f"Directory {data_dir} does not exist!")
+            return {}, None
+
+        # Get all pickle files in the directory
+        pickle_files = list(data_dir.glob("*.pkl"))
+
+        if not pickle_files:
+            print(f"No pickle files found in {data_dir}")
+            return {}, None
+
+        print(f"Found {len(pickle_files)} pickle files in {data_dir}\n")
+
+        # Dictionary to store scored dataframes
+        scored_dfs = {}
+
+        # Debug: track filter failures
+        filter_failures = {}
+
+        # Process each pickle file
+        for pickle_file in pickle_files:
+            # Extract symbol from filename (e.g., "AAOI-2026-02-14.pkl" -> "AAOI")
+            symbol = pickle_file.stem.split("-")[0]
+
+            print(f"Processing {symbol}...")
+
+            try:
+                # Load the pickle file
+                df = self.load_pickle(str(pickle_file))
+
+                # Add features (with benchmark if available)
+                feature_df = self.features.add_all_features(
+                    df, benchmark_df=self.benchmark_df
+                )
+
+                # Store for RS rank calculation later
+                scored_dfs[symbol] = feature_df
+
+            except Exception as e:
+                print(f"- Error processing {symbol}: {e}")
+                import traceback
+
+                if debug:
+                    traceback.print_exc()
+                continue
+
+        print(f"\nProcessed {len(scored_dfs)} stocks successfully")
+
+        # Calculate RS ranks across all stocks (peer comparison)
+        print("\nCalculating RS ranks vs peers...")
+        rs_ranks = self.features.calculate_rs_rank(scored_dfs, self.benchmark_df)
+
+        # Now score each stock with RS rank data
+        print("\nScoring stocks...")
+        final_scored_dfs = {}
+        for symbol, feature_df in scored_dfs.items():
+            try:
+                # Get RS ranks for this symbol
+                symbol_rs_ranks = rs_ranks.get(symbol, {})
+
+                # Score the dataframe
+                scored_df = self.scoring.score_dataframe(
+                    feature_df, symbol=symbol, rs_ranks=symbol_rs_ranks
+                )
+
+                final_scored_dfs[symbol] = scored_df
+
+                # Debug: Check if latest row passes filters
+                if debug and not scored_df.empty:
+                    latest_row = scored_df.iloc[-1]
+                    passes = latest_row.get("passes_filters", False)
+                    if not passes:
+                        # Get the failure reasons
+                        _, failures = self.scoring.apply_hard_filters(latest_row)
+                        filter_failures[symbol] = failures
+                        print(f"  ⚠ {symbol}: Failed - {', '.join(failures)}")
+                    else:
+                        score = latest_row.get("total_score", 0)
+                        rs_rank = latest_row.get("rs_spy_60", 0)
+                        print(f"  ✓ {symbol}: Score={score:.1f}, RS_60={rs_rank:.2f}")
+
+            except Exception as e:
+                print(f"  ✗ Error scoring {symbol}: {e}")
+                if debug:
+                    import traceback
+
+                    traceback.print_exc()
+
+        # Debug: Show filter failure summary
+        if debug and filter_failures:
+            print("\n" + "=" * 80)
+            print("FILTER FAILURE SUMMARY")
+            print("=" * 80)
+            failure_counts = {}
+            for symbol, failures in filter_failures.items():
+                for failure in failures:
+                    failure_counts[failure] = failure_counts.get(failure, 0) + 1
+
+            for failure, count in sorted(failure_counts.items(), key=lambda x: -x[1]):
+                print(f"{count:3d} stocks: {failure}")
+            print()
+
+        watchlist = None
+        if final_scored_dfs:
+            print("\nGenerating watchlist summary...")
+            watchlist = self.scoring.create_watchlist_summary(final_scored_dfs)
+
+            if not watchlist.empty:
+                print(f"✓ Watchlist created with {len(watchlist)} stocks")
+
+            else:
+                print("⚠ No stocks passed the filters")
+
+        return final_scored_dfs, watchlist
 
 
 class Features:
@@ -161,18 +296,98 @@ class Features:
 
         return df
 
-    # TODO - might need to change this to nasdaq comp df??
-    def calculate_relative_strength(self, df, spy_df):
+    def calculate_relative_strength(self, df, benchmark_df, benchmark_name="SPY"):
+        """
+        Calculate relative strength vs benchmark (SPY or QQQ).
 
-        # rs_spy_20: % change stock vs % change SPY (20 days)
-        # rs_spy_60: % change stock vs % change SPY (60 days)
-        # rs_spy_120: % change stock vs % change SPY (120 days)
-        pass
+        RS = (Stock % Change) / (Benchmark % Change)
+        RS > 1.0 means outperforming
+        RS < 1.0 means underperforming
 
-    # TODO - i want to calc rs based on both the market as a whole but especially against its peers
-    def calculate_rs_rank(self, symbol):
-        # calculate percentile rank of this stock vs entire watchlist.
-        pass
+        Args:
+            df: Stock dataframe
+            benchmark_df: Benchmark dataframe (SPY/QQQ) with same date index
+            benchmark_name: Name of benchmark for column naming
+
+        Returns df with:
+        - rs_{benchmark}_20: 20-day relative strength
+        - rs_{benchmark}_60: 60-day relative strength
+        - rs_{benchmark}_120: 120-day relative strength
+        """
+        # Ensure both dataframes are aligned by date
+        # Reindex benchmark to match stock dates
+        benchmark_aligned = benchmark_df.reindex(df.index, method="ffill")
+
+        # Calculate percentage changes for different periods
+        for period in [20, 60, 120]:
+            # Stock % change
+            stock_pct_change = df["close"].pct_change(periods=period)
+
+            # Benchmark % change
+            if "close" in benchmark_aligned.columns:
+                benchmark_pct_change = benchmark_aligned["close"].pct_change(
+                    periods=period
+                )
+            else:
+                # If benchmark doesn't have 'close', assume first numeric column
+                benchmark_pct_change = benchmark_aligned.iloc[:, 0].pct_change(
+                    periods=period
+                )
+
+            # Relative strength ratio
+            # Add small epsilon to avoid division by zero
+            df[f"rs_{benchmark_name.lower()}_{period}"] = stock_pct_change / (
+                benchmark_pct_change + 0.0001
+            )
+
+        return df
+
+    def calculate_rs_rank(self, stock_dfs, benchmark_df=None):
+        """
+        Calculate RS rank (percentile) for each stock vs the entire watchlist.
+        This shows which stocks are the strongest performers relative to peers.
+
+        Args:
+            stock_dfs: Dict of {symbol: dataframe} for all stocks in watchlist
+            benchmark_df: Optional benchmark dataframe
+
+        Returns:
+            Dict of {symbol: {date: rs_rank}} where rs_rank is 0-100 percentile
+        """
+        # For each date, calculate all stocks' performance and rank them
+        # This needs to be called at the Engine level with all stocks
+
+        # Get common dates across all stocks
+        all_dates = set()
+        for df in stock_dfs.values():
+            all_dates.update(df.index)
+        all_dates = sorted(all_dates)
+
+        rs_ranks = {symbol: {} for symbol in stock_dfs.keys()}
+
+        # For each date, rank stocks by their 60-day performance
+        for date in all_dates:
+            daily_performances = {}
+
+            for symbol, df in stock_dfs.items():
+                if date in df.index:
+                    # Use 60-day % change as the ranking metric
+                    perf = (
+                        df.loc[date, "close"] / df["close"].shift(60).loc[date] - 1
+                        if date in df.index
+                        else None
+                    )
+                    if perf is not None and not pd.isna(perf):
+                        daily_performances[symbol] = perf
+
+            # Rank the stocks (percentile)
+            if daily_performances:
+                sorted_symbols = sorted(daily_performances.items(), key=lambda x: x[1])
+                for rank, (symbol, _) in enumerate(sorted_symbols):
+                    percentile = (rank / len(sorted_symbols)) * 100
+                    rs_ranks[symbol][date] = percentile
+
+        return rs_ranks
 
     # big move up before consolidation
     def detect_prior_moves(self, df, lookback=60):
@@ -228,26 +443,124 @@ class Features:
     """
 
     def calculate_stop(self, df):
-        pass
+        """
+        Calculate stop loss levels based on Qullamaggie methodology.
+
+        Entry Rule: Stop at the low of the consolidation day (low of current bar)
+        Trailing Rule: Once profitable, trail stop to close below 10 SMA
+
+        Returns df with:
+        - stop_level: The actual price level for the stop
+        - stop_distance_pct: Distance from current price to stop as %
+        - trailing_stop_triggered: Boolean if stock closed below 10 SMA
+        """
+        # Initial stop: Low of the current day (conservative entry)
+        # If low == close, use a small buffer (0.5% below close) to avoid division by zero
+        df["stop_level"] = df.apply(
+            lambda row: (
+                row["low"] if row["low"] < row["close"] else row["close"] * 0.995
+            ),  # 0.5% below close as minimum stop
+            axis=1,
+        )
+
+        # Stop distance as percentage
+        # Add small epsilon to avoid division by zero
+        df["stop_distance_pct"] = (df["close"] - df["stop_level"]) / (
+            df["close"] + 0.0001
+        )
+
+        # Ensure stop distance is always positive and reasonable
+        df["stop_distance_pct"] = df["stop_distance_pct"].clip(lower=0.001, upper=0.20)
+
+        # Trailing stop rule: Close below 10 SMA (for position management)
+        df["trailing_stop_triggered"] = df["close"] < df["sma_10"]
+
+        return df
 
     def calculate_rr(self, df):
-        pass
+        """
+        Calculate risk/reward ratio.
 
-    def add_all_features(self, df):
+        Target: Based on prior move and consolidation breakout patterns
+        Risk: Stop distance
+
+        Returns df with:
+        - target_level: Price target based on base depth and prior moves
+        - potential_gain_pct: Potential gain to target
+        - potential_r: R-multiple (reward/risk ratio)
+        """
+        # Target calculation based on consolidation base depth
+        # Conservative: 1x the base depth from breakout
+        # Aggressive: 2x the base depth or prior move high
+
+        # Method 1: Target based on consolidation range projection
+        consol_range_pct = df.get("consol_range_15", pd.Series([0.05] * len(df)))
+        if isinstance(consol_range_pct, (int, float)):
+            consol_range_pct = pd.Series([consol_range_pct] * len(df), index=df.index)
+        base_target_1 = df["close"] * (1 + consol_range_pct)
+
+        # Method 2: Target based on measured move (prior power move)
+        lookback = 60
+        rolling_high = df["high"].rolling(window=lookback).max()
+        base_target_2 = rolling_high
+
+        # Use the higher of the two targets, but cap at 15% gain
+        max_target = df["close"] * 1.15
+        df["target_level"] = pd.concat([base_target_1, base_target_2], axis=1).max(
+            axis=1
+        )
+        df["target_level"] = df["target_level"].clip(upper=max_target)
+
+        # Potential gain percentage
+        df["potential_gain_pct"] = (df["target_level"] - df["close"]) / df["close"]
+        df["potential_gain_pct"] = df["potential_gain_pct"].clip(lower=0)
+
+        # Risk/Reward ratio (R-multiple)
+        # Avoid division by zero - already clipped in calculate_stop
+        df["potential_r"] = df["potential_gain_pct"] / df["stop_distance_pct"]
+        df["potential_r"] = df["potential_r"].clip(upper=10)  # Cap at 10R
+
+        return df
+
+    def add_all_features(self, df, benchmark_df=None):
+        """
+        Add all technical features to dataframe.
+
+        Args:
+            df: Stock dataframe
+            benchmark_df: Optional benchmark (SPY/QQQ) for relative strength
+        """
         df = df.copy()
 
+        # Technical indicators
         df = self.add_moving_averages(df)
         df = self.add_atr(df)
         df = self.add_range_metrics(df)
         df = self.add_volume_metrics(df)
 
+        # Trend analysis
         df = self.add_ma_relationships(df)
 
+        # Base structure
         df = self.detect_consolidation_range(df)
         df = self.calculate_base_depth(df)
 
+        # Historical patterns
         df = self.detect_prior_moves(df)
         df = self.calculate_higher_lows(df)
+
+        # Volume patterns
+        df = self.detect_volume_drying(df, lookback=10)
+
+        # Risk/Reward (NEW)
+        df = self.calculate_stop(df)
+        df = self.calculate_rr(df)
+
+        # Relative Strength (NEW) - if benchmark provided
+        if benchmark_df is not None:
+            df = self.calculate_relative_strength(
+                df, benchmark_df, benchmark_name="SPY"
+            )
 
         return df
 
@@ -720,11 +1033,14 @@ class Scoring:
             failures.append(f"ADR {row.get('adr_pct', 0):.1%} < {min_adr:.1%}")
 
         # 5. Maximum stop distance
+        # Stop should be reasonable - not too tight (< 0.1%) and not too wide (> 12%)
         max_stop = self.config.get("stop_loss_max_pct", 0.08) * 1.5  # 12% hard cutoff
-        if row.get("stop_distance_pct", 1.0) > max_stop:
-            failures.append(
-                f"Stop distance {row.get('stop_distance_pct', 0):.1%} > {max_stop:.1%}"
-            )
+        stop_dist = row.get("stop_distance_pct", 0)
+
+        if stop_dist > max_stop:
+            failures.append(f"Stop distance {stop_dist:.1%} > {max_stop:.1%}")
+        elif stop_dist < 0.001:  # Less than 0.1% is too tight
+            failures.append(f"Stop distance {stop_dist:.1%} too tight (< 0.1%)")
 
         return len(failures) == 0, failures
 
@@ -861,7 +1177,7 @@ class Scoring:
                     "potential_r": row["potential_r"],
                     "base_days": row["consol_days"],
                     "base_range": row["consol_range_15"],
-                    "rs_60": row["rs_spy_60"],
+                    "rs_60": row.get("rs_spy_60", 0.0),  # Default to 0 if no benchmark
                     "dollar_vol": row["dollar_volume"],
                     "adr_pct": row["adr_pct"],
                     # Component scores

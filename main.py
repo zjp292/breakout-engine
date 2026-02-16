@@ -5,14 +5,8 @@ from engine import Engine
 from config import PARAMETERS
 
 
-print("test: ", datetime.today().strftime("%Y-%m-%d"))
-
-# init objects
-ig = Ingestor()
-# ig.mergefiles()
-# ig.get_data()
-
 eg = Engine(PARAMETERS)
+scored_dfs, watchlist = eg.process_stock("2026-02-14", debug=True)
 
-# print(eg.load_pickle("data/2026-02-14/AAOI-2026-02-14.pkl"))
-eg.process_stock()
+if watchlist is not None:
+    print(watchlist.head(20))
