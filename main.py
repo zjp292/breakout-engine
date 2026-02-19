@@ -6,7 +6,7 @@ from config import PARAMETERS
 
 
 eg = Engine(PARAMETERS)
-scored_dfs, watchlist = eg.process_stock("2026-02-14", debug=True)
+scored_dfs, watchlist = eg.process_stock("2026-02-18", debug=True)
 
 if watchlist is not None:
     print(watchlist.head(20))

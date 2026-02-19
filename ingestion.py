@@ -189,6 +189,42 @@ class SchwabAPIClient:
         resp = requests.get(url, headers=headers)
         return resp.json()
 
+    def get_nasdaq_benchmark(self, start_ts, end_ts):
+        """
+        Fetch NASDAQ Composite ($COMPX) daily price history from Schwab API.
+
+        Returns a DataFrame indexed by normalized datetime (date-only),
+        with columns: open, high, low, close, volume.
+        """
+        access_token = self.get_access_token()
+        headers = {"Authorization": f"Bearer {access_token}"}
+        url = f"{self.base_url_market_data}/pricehistory"
+
+        params = {
+            "symbol": "$COMPX",
+            "periodType": "year",
+            "frequencyType": "daily",
+            "frequency": 1,
+            "needExtendedHoursData": "false",
+            "needPreviousClose": "false",
+            "startDate": int(start_ts),
+            "endDate": int(end_ts),
+        }
+
+        res = requests.get(url, headers=headers, params=params)
+        res.raise_for_status()
+        data = res.json()
+
+        if "candles" not in data:
+            raise ValueError(f"No candle data returned for $COMPX: {data}")
+
+        df = pd.DataFrame(data["candles"])
+        df["datetime"] = pd.to_datetime(df["datetime"], unit="ms")
+        df = df.set_index("datetime")
+        df.index = df.index.normalize()  # strip time component to date-only
+
+        return df
+
     def get_historical_prices(
         self,
         data_dir,

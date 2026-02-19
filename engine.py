@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from models import ScoreBreakdown
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 class Engine:
@@ -13,67 +13,91 @@ class Engine:
         self.scoring = Scoring(config)
         self.benchmark_df = None
 
-    def load_benchmark(self, benchmark_file):
-        """
-        Load benchmark data (SPY or QQQ) for relative strength calculations.
-
-        Args:
-            benchmark_file: Path to benchmark pickle file
-        """
-        try:
-            self.benchmark_df = self.load_pickle(benchmark_file)
-            print(f"✓ Loaded benchmark data from {benchmark_file}")
-        except Exception as e:
-            print(f"⚠ Could not load benchmark: {e}")
-            self.benchmark_df = None
-
     def load_pickle(self, file):
         with open(file, "rb") as f:
             return pickle.load(f)
 
+    def load_benchmark(self, date_str=None):
+        """
+        Fetch NASDAQ Composite ($COMPX) from the Schwab API and store as benchmark_df.
+        The resulting DataFrame is indexed by normalized date (DatetimeIndex).
+        """
+        from ingestion import SchwabAPIClient
+
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=365)
+        end_ts = int(end_dt.timestamp() * 1000)
+        start_ts = int(start_dt.timestamp() * 1000)
+
+        client = SchwabAPIClient()
+        print("Fetching NASDAQ Composite ($COMPX) benchmark data...")
+        self.benchmark_df = client.get_nasdaq_benchmark(start_ts, end_ts)
+        print(f"Benchmark loaded: {len(self.benchmark_df)} trading days")
+
     def process_stock(self, date_str=None, debug=False):
-        if date_str == None:
+        if date_str is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
         data_dir = Path(f"data/{date_str}")
 
-        # Check if directory exists
-        if not data_dir.exists():
-            print(f"Directory {data_dir} does not exist!")
-            return {}, None
+        if not data_dir.exists() or not list(data_dir.glob("*.pkl")):
+            print(f"No data found for {date_str}. Running ingestion...")
+            from ingestion import Ingestor
 
-        # Get all pickle files in the directory
+            ingestor = Ingestor()
+            ingestor.mergefiles()
+
+            if not ingestor.ticker_list:
+                print("No tickers found in today's watchlist exports. Exiting.")
+                return {}, None
+
+            print(f"Fetching data for {len(ingestor.ticker_list)} tickers...")
+            ingestor.get_data()
+
         pickle_files = list(data_dir.glob("*.pkl"))
 
         if not pickle_files:
-            print(f"No pickle files found in {data_dir}")
+            print(f"No pickle files found in {data_dir} after ingestion.")
             return {}, None
 
         print(f"Found {len(pickle_files)} pickle files in {data_dir}\n")
 
+        # Load NASDAQ Composite benchmark from Schwab API
+        try:
+            self.load_benchmark(date_str)
+        except Exception as e:
+            print(f"Warning: Could not load benchmark data: {e}")
+            self.benchmark_df = None
+
         # Dictionary to store scored dataframes
         scored_dfs = {}
 
-        # Debug: track filter failures
+        # track filtered tickers
         filter_failures = {}
 
-        # Process each pickle file
         for pickle_file in pickle_files:
-            # Extract symbol from filename (e.g., "AAOI-2026-02-14.pkl" -> "AAOI")
+            # get symbol
             symbol = pickle_file.stem.split("-")[0]
 
             print(f"Processing {symbol}...")
 
             try:
-                # Load the pickle file
                 df = self.load_pickle(str(pickle_file))
 
-                # Add features (with benchmark if available)
+                # Convert Schwab ms datetime to a normalized DatetimeIndex
+                if "datetime" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+                    df["datetime"] = pd.to_datetime(df["datetime"], unit="ms")
+                    df = df.set_index("datetime")
+                    df.index = df.index.normalize()
+
+                # add features
                 feature_df = self.features.add_all_features(
                     df, benchmark_df=self.benchmark_df
                 )
 
-                # Store for RS rank calculation later
                 scored_dfs[symbol] = feature_df
 
             except Exception as e:
@@ -90,7 +114,6 @@ class Engine:
         print("\nCalculating RS ranks vs peers...")
         rs_ranks = self.features.calculate_rs_rank(scored_dfs, self.benchmark_df)
 
-        # Now score each stock with RS rank data
         print("\nScoring stocks...")
         final_scored_dfs = {}
         for symbol, feature_df in scored_dfs.items():
@@ -116,7 +139,7 @@ class Engine:
                         print(f"  ⚠ {symbol}: Failed - {', '.join(failures)}")
                     else:
                         score = latest_row.get("total_score", 0)
-                        rs_rank = latest_row.get("rs_spy_60", 0)
+                        rs_rank = latest_row.get("rs_comp_60", 0)
                         print(f"  ✓ {symbol}: Score={score:.1f}, RS_60={rs_rank:.2f}")
 
             except Exception as e:
@@ -556,10 +579,10 @@ class Features:
         df = self.calculate_stop(df)
         df = self.calculate_rr(df)
 
-        # Relative Strength (NEW) - if benchmark provided
+        # Relative Strength vs NASDAQ Composite - if benchmark provided
         if benchmark_df is not None:
             df = self.calculate_relative_strength(
-                df, benchmark_df, benchmark_name="SPY"
+                df, benchmark_df, benchmark_name="COMP"
             )
 
         return df
@@ -597,13 +620,12 @@ class Scoring:
             },
         )
 
-        # Thresholds for grading
         self.min_score_alert = config.get("min_score_alert", 80)
         self.min_score_watchlist = config.get("min_score_watchlist", 70)
 
-    # ============================================
-    # BASE QUALITY SCORING (0-25 points)
-    # ============================================
+    """
+    base 
+    """
 
     def score_base_quality(self, row: pd.Series):
         """
@@ -770,7 +792,7 @@ class Scoring:
         details = {}
 
         # 1. SHORT-TERM RS - 20 days (0-6 points)
-        rs_20 = row.get("rs_spy_20", 0.0)
+        rs_20 = row.get("rs_comp_20", 0.0)
 
         if rs_20 >= 0.10:  # 10%+ outperformance
             rs_20_score = 6.0
@@ -787,7 +809,7 @@ class Scoring:
         details["rs_20_day"] = rs_20_score
 
         # 2. MEDIUM-TERM RS - 60 days (0-7 points)
-        rs_60 = row.get("rs_spy_60", 0.0)
+        rs_60 = row.get("rs_comp_60", 0.0)
 
         if rs_60 >= 0.20:  # 20%+ outperformance
             rs_60_score = 7.0
@@ -1177,7 +1199,7 @@ class Scoring:
                     "potential_r": row["potential_r"],
                     "base_days": row["consol_days"],
                     "base_range": row["consol_range_15"],
-                    "rs_60": row.get("rs_spy_60", 0.0),  # Default to 0 if no benchmark
+                    "rs_60": row.get("rs_comp_60", 0.0),  # Default to 0 if no benchmark
                     "dollar_vol": row["dollar_volume"],
                     "adr_pct": row["adr_pct"],
                     # Component scores
