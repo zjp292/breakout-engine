@@ -24,7 +24,7 @@ class Ingestor:
         self.watchlist_path = Path("watchlists")
         self.ticker_list = set()
         self.api = SchwabAPIClient()
-        # self.api.initial_auth_flow()
+        self.api.initial_auth_flow()
 
     def mergefiles(
         self,
@@ -196,12 +196,25 @@ class SchwabAPIClient:
         Returns a DataFrame indexed by normalized datetime (date-only),
         with columns: open, high, low, close, volume.
         """
+        return self.get_index_data("$COMPX", start_ts, end_ts)
+
+    def get_index_data(self, symbol: str, start_ts: int, end_ts: int) -> pd.DataFrame:
+        """
+        Fetch daily OHLCV price history for any symbol (index, ETF, or stock).
+
+        Used to load COMPX, SPY, IWM and other market-condition indices.
+
+        Returns a DataFrame indexed by normalized datetime (date-only),
+        with columns: open, high, low, close, volume.
+
+        Raises ValueError if no candle data is returned.
+        """
         access_token = self.get_access_token()
         headers = {"Authorization": f"Bearer {access_token}"}
         url = f"{self.base_url_market_data}/pricehistory"
 
         params = {
-            "symbol": "$COMPX",
+            "symbol": symbol,
             "periodType": "year",
             "frequencyType": "daily",
             "frequency": 1,
@@ -216,12 +229,12 @@ class SchwabAPIClient:
         data = res.json()
 
         if "candles" not in data:
-            raise ValueError(f"No candle data returned for $COMPX: {data}")
+            raise ValueError(f"No candle data returned for {symbol}: {data}")
 
         df = pd.DataFrame(data["candles"])
         df["datetime"] = pd.to_datetime(df["datetime"], unit="ms")
         df = df.set_index("datetime")
-        df.index = df.index.normalize()  # strip time component to date-only
+        df.index = df.index.normalize()
 
         return df
 

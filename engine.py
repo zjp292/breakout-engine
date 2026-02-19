@@ -12,6 +12,9 @@ class Engine:
         self.features = Features(config)
         self.scoring = Scoring(config)
         self.benchmark_df = None
+        self.spy_df = None          # S&P 500 — multi-index confirmation
+        self.iwm_df = None          # Russell 2000 — small-cap breadth
+        self.market_condition = None  # MarketConditionResult from last run
 
     def load_pickle(self, file):
         with open(file, "rb") as f:
@@ -19,57 +22,159 @@ class Engine:
 
     def load_benchmark(self, date_str=None):
         """
-        Fetch NASDAQ Composite ($COMPX) from the Schwab API and store as benchmark_df.
-        The resulting DataFrame is indexed by normalized date (DatetimeIndex).
+        Fetch NASDAQ Composite ($COMPX) and confirmation indices (SPY, IWM)
+        from the Schwab API.
+
+        COMPX is the primary benchmark used for RS calculations and market-condition
+        scoring.  SPY and IWM provide multi-index confirmation in the market-condition
+        analysis but are optional — failure to load them is handled gracefully.
         """
         from ingestion import SchwabAPIClient
 
         if date_str is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-        end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=365)
-        end_ts = int(end_dt.timestamp() * 1000)
+        end_dt   = datetime.now()
+        start_dt = end_dt - timedelta(days=400)   # extra buffer for 200-day SMA
+        end_ts   = int(end_dt.timestamp() * 1000)
         start_ts = int(start_dt.timestamp() * 1000)
 
         client = SchwabAPIClient()
+
         print("Fetching NASDAQ Composite ($COMPX) benchmark data...")
-        self.benchmark_df = client.get_nasdaq_benchmark(start_ts, end_ts)
-        print(f"Benchmark loaded: {len(self.benchmark_df)} trading days")
+        self.benchmark_df = client.get_index_data("$COMPX", start_ts, end_ts)
+        print(f"  COMPX loaded: {len(self.benchmark_df)} trading days")
 
-    def _get_regime_multiplier(self):
+        # SPY — S&P 500 large-cap confirmation
+        try:
+            self.spy_df = client.get_index_data("SPY", start_ts, end_ts)
+            print(f"  SPY   loaded: {len(self.spy_df)} trading days")
+        except Exception as e:
+            print(f"  Warning: Could not load SPY: {e}")
+            self.spy_df = None
+
+        # IWM — Russell 2000 small-cap / risk-on confirmation
+        try:
+            self.iwm_df = client.get_index_data("IWM", start_ts, end_ts)
+            print(f"  IWM   loaded: {len(self.iwm_df)} trading days")
+        except Exception as e:
+            print(f"  Warning: Could not load IWM: {e}")
+            self.iwm_df = None
+
+    def analyze_market_condition(self, feature_dfs: dict) -> float:
         """
-        Compute market regime score multiplier from benchmark trend.
+        Run the multi-factor market condition analysis and return the regime multiplier.
 
-        Both Qullamaggie and Minervini dramatically reduce activity in weak markets.
-        This multiplier gates scores downward so that the same technical setup
-        ranks lower (and may not pass thresholds) when the market is sick.
+        Replaces the old simple SMA-based _get_regime_multiplier() with a
+        comprehensive 100-point scoring system covering:
+          · Index trend quality (SMA alignment + slope + SPY/IWM confirmation)
+          · Distribution day count (rolling 25-session window)
+          · Follow-through day recency and validity
+          · Internal breadth (watchlist stocks above 50 SMA, in Stage 2, near highs)
+          · Market momentum and realized volatility
 
-        Regime tiers:
-        - Confirmed uptrend (price > 50 SMA > 200 SMA): 1.00 — no adjustment
-        - Mixed/correction (price above 200 but below 50 SMA): 0.85
-        - Downtrend (price below 200 SMA): 0.75 — be very selective
+        Sets self.market_condition (MarketConditionResult) for downstream use.
+        Returns the regime_multiplier (0.50–1.00).
         """
-        if self.benchmark_df is None or not self.config.get("market_regime", True):
+        from market_condition import MarketConditionAnalyzer
+
+        if not self.config.get("market_regime", True):
+            self.market_condition = None
             return 1.0
 
-        bench_close = self.benchmark_df["close"]
-        if len(bench_close) < 200:
+        if self.benchmark_df is None:
+            self.market_condition = None
             return 1.0
 
-        latest = bench_close.iloc[-1]
-        sma50 = bench_close.rolling(50).mean().iloc[-1]
-        sma200 = bench_close.rolling(200).mean().iloc[-1]
+        analyzer = MarketConditionAnalyzer(self.config)
+        result   = analyzer.analyze(
+            compx_df          = self.benchmark_df,
+            spy_df            = self.spy_df,
+            iwm_df            = self.iwm_df,
+            stock_feature_dfs = feature_dfs,
+        )
 
-        if pd.isna(sma50) or pd.isna(sma200):
-            return 1.0
+        self.market_condition = result
+        self._print_market_condition(result)
+        return result.regime_multiplier
 
-        if latest > sma50 and sma50 > sma200:
-            return 1.0   # Confirmed bull: price above 50, 50 above 200
-        elif latest > sma200:
-            return 0.85  # Correction: above 200 but below 50 SMA
+    def _print_market_condition(self, mc) -> None:
+        """Print a formatted market condition report to stdout."""
+        W = 66
+        bar = "═" * W
+
+        # Regime colour codes (no external dep; plain ASCII for terminal)
+        regime_badges = {
+            "BULL":      "▲ BULL",
+            "UPTREND":   "↑ UPTREND",
+            "MIXED":     "↔ MIXED",
+            "CAUTION":   "↓ CAUTION",
+            "DOWNTREND": "▼ DOWNTREND",
+        }
+        badge = regime_badges.get(mc.regime, mc.regime)
+
+        print(f"\n{bar}")
+        print(f"  MARKET CONDITION ANALYSIS")
+        print(bar)
+        print(
+            f"  {badge:14s}  score {mc.score:.1f}/100"
+            f"   →  stock-score multiplier ×{mc.regime_multiplier:.2f}"
+        )
+        print(f"  {'─' * (W - 4)}")
+
+        # Index Trend
+        conds = mc.details.get("index", {}).get("sma_conditions", {})
+        aligned = sum(1 for v in conds.values() if v)
+        spy_str = "SPY ✓" if mc.spy_above_200 else ("SPY ✗" if mc.details.get("index", {}).get("spy_above_200") is False else "SPY –")
+        iwm_str = "IWM ✓" if mc.iwm_above_200 else ("IWM ✗" if mc.details.get("index", {}).get("iwm_above_200") is False else "IWM –")
+        print(
+            f"  Index Trend       {mc.index_trend_score:5.1f}/25"
+            f"   [{aligned}/6 SMA conditions  {spy_str}  {iwm_str}]"
+        )
+
+        # Distribution Days
+        d, s = mc.distribution_day_count, mc.stalling_day_count
+        dist_flag = "  ⚠ heavy distribution" if d >= 5 else ""
+        print(
+            f"  Distribution Days {mc.distribution_score:5.1f}/20"
+            f"   [{d} D-day{'s' if d != 1 else ''}  {s} stalling{dist_flag}]"
+        )
+
+        # Follow-Through Day
+        if mc.ftd_found:
+            validity = "valid" if mc.ftd_valid else "INVALIDATED"
+            ago      = f"{mc.ftd_days_ago}d ago" if mc.ftd_days_ago is not None else "?"
+            ftd_str  = f"FTD {mc.ftd_date[:10] if mc.ftd_date else '?'} ({ago}, {validity})"
         else:
-            return 0.75  # Downtrend: below 200 SMA
+            pct_hi = mc.details.get("follow_through", {}).get("pct_from_high")
+            if pct_hi is not None:
+                ftd_str = f"no FTD — {abs(pct_hi)*100:.1f}% from 52wk high"
+            else:
+                ftd_str = "no FTD detected in lookback window"
+        print(
+            f"  Follow-Through    {mc.follow_through_score:5.1f}/20"
+            f"   [{ftd_str}]"
+        )
+
+        # Internal Breadth
+        n = mc.details.get("breadth", {}).get("n_stocks", 0)
+        print(
+            f"  Internal Breadth  {mc.breadth_score:5.1f}/20"
+            f"   [{mc.pct_above_50sma*100:.0f}% >50d  "
+            f"{mc.pct_in_stage2*100:.0f}% Stage2  "
+            f"{mc.pct_near_52wk_high*100:.0f}% near high  "
+            f"n={n}]"
+        )
+
+        # Momentum & Volatility
+        rv_pct  = mc.realized_vol_annualized * 100
+        roc_pct = mc.compx_roc_21d * 100
+        print(
+            f"  Momentum/Vol      {mc.momentum_score:5.1f}/15"
+            f"   [21d ROC {roc_pct:+.1f}%  Realized vol {rv_pct:.1f}%]"
+        )
+
+        print(bar + "\n")
 
     def process_stock(self, date_str=None, debug=False):
         if date_str is None:
@@ -99,21 +204,14 @@ class Engine:
 
         print(f"Found {len(pickle_files)} pickle files in {data_dir}\n")
 
-        # Load NASDAQ Composite benchmark from Schwab API
+        # Load NASDAQ Composite benchmark (+ SPY, IWM) from Schwab API
         try:
             self.load_benchmark(date_str)
         except Exception as e:
             print(f"Warning: Could not load benchmark data: {e}")
             self.benchmark_df = None
 
-        # Set market regime multiplier — affects all scoring downstream
-        regime_mult = self._get_regime_multiplier()
-        self.scoring.regime_multiplier = regime_mult
-        regime_labels = {1.0: "BULL", 0.85: "CORRECTION", 0.75: "DOWNTREND"}
-        regime_label = regime_labels.get(regime_mult, f"{regime_mult:.2f}x")
-        print(f"Market regime: {regime_label} (score multiplier: {regime_mult:.2f})")
-
-        # Dictionary to store scored dataframes
+        # Dictionary to store feature dataframes (scored after market condition)
         scored_dfs = {}
 
         # track filtered tickers
@@ -154,6 +252,22 @@ class Engine:
         # Calculate RS ranks across all stocks (peer comparison)
         print("\nCalculating RS ranks vs peers...")
         rs_ranks = self.features.calculate_rs_rank(scored_dfs, self.benchmark_df)
+
+        # ── Market Condition Analysis ──────────────────────────────────────────
+        # Runs AFTER features are computed so internal breadth (% above 50 SMA,
+        # % in Stage 2, % near highs) can be drawn from the full feature DFs.
+        # The resulting regime_multiplier gates all stock scores downward in weak
+        # markets — matching how Qullamaggie and Minervini reduce exposure.
+        try:
+            regime_mult = self.analyze_market_condition(scored_dfs)
+        except Exception as e:
+            print(f"Warning: Market condition analysis failed: {e}")
+            if debug:
+                import traceback
+                traceback.print_exc()
+            regime_mult = 1.0
+
+        self.scoring.regime_multiplier = regime_mult
 
         print("\nScoring stocks...")
         final_scored_dfs = {}
