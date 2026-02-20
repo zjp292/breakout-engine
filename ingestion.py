@@ -24,7 +24,7 @@ class Ingestor:
         self.watchlist_path = Path("watchlists")
         self.ticker_list = set()
         self.api = SchwabAPIClient()
-        self.api.initial_auth_flow()
+        # self.api.initial_auth_flow()
 
     def mergefiles(
         self,

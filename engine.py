@@ -455,6 +455,10 @@ class Features:
 
         df[f"consol_range_{lookback}"] = (rolling_high - rolling_low) / df["close"]
 
+        # Top of the current base — the breakout price level.
+        # Stored here so charting and backtesting can reference it directly.
+        df["breakout_level"] = rolling_high
+
         # Detect tight consolidation (range < threshold)
         tight_threshold = self.config.get("range_compression_threshold", 0.05)
         df["is_tight_consolidation"] = df[f"consol_range_{lookback}"] < tight_threshold
@@ -1519,6 +1523,7 @@ class Scoring:
                     "grade": row["grade"],
                     "signal": row["signal"],
                     "price": row["close"],
+                    "breakout": row.get("breakout_level"),
                     "stop": row["stop_level"],
                     "stop_distance": row["stop_distance_pct"],
                     "potential_r": row["potential_r"],
