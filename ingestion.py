@@ -9,7 +9,9 @@ import requests
 import webbrowser
 import csv
 import pickle
+import time
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
@@ -45,16 +47,17 @@ class Ingestor:
                     for _ in range(4):
                         next(csv_reader)
 
-                    # add row to ticker list set
+                    # add row to ticker list set; allow hyphens for tickers like BRK-B
                     for row in csv_reader:
-                        if any(not row[0].isalnum() for c in row[0]):
+                        ticker = row[0].strip()
+                        if not ticker or not ticker.replace("-", "").isalnum():
                             continue
-                        self.ticker_list.add(row[0])
+                        self.ticker_list.add(ticker)
         return
 
     def get_data(self):
         if len(self.ticker_list) == 0:
-            raise ValueError("ticker list not intialized")
+            raise ValueError("ticker list not initialized")
 
         today = datetime.today().strftime("%Y-%m-%d")
         end_dt = datetime.today()
@@ -62,7 +65,7 @@ class Ingestor:
         end_dt = int(end_dt.timestamp() * 1000)
         start_dt = int(start_dt.timestamp() * 1000)
 
-        data_dir = f"data/{today.rstrip()}"
+        data_dir = f"data/{today}"
         os.makedirs(data_dir, exist_ok=True)
 
         for ticker in self.ticker_list:
@@ -113,12 +116,16 @@ class SchwabAPIClient:
         expires_at = self.tokens.get("expires_at")
         if not expires_at:
             return True
-        return datetime.utcnow() >= datetime.fromisoformat(expires_at)
+        dt = datetime.fromisoformat(expires_at)
+        # Handle legacy tokens stored without timezone info (treat as UTC)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) >= dt
 
     def set_expiry(self):
-        # Set 'expires_at' in UTC ISO format
+        # Set 'expires_at' as a UTC-aware ISO string
         expires_in = self.tokens.get("expires_in", 0)
-        expires_at = datetime.utcnow() + timedelta(seconds=int(expires_in) - 60)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in) - 60)
         self.tokens["expires_at"] = expires_at.isoformat()
         self.save_tokens()
 
@@ -137,12 +144,20 @@ class SchwabAPIClient:
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
-        resp = requests.post(self.TOKEN_URL, headers=headers, data=data)
-        resp.raise_for_status()
-        self.tokens = resp.json()
-        self.set_expiry()
-        print("Tokens refreshed automatically.")
-        return self.tokens
+        for attempt in range(1, 4):
+            try:
+                resp = requests.post(self.TOKEN_URL, headers=headers, data=data, timeout=15)
+                resp.raise_for_status()
+                self.tokens = resp.json()
+                self.set_expiry()
+                print("Tokens refreshed automatically.")
+                return self.tokens
+            except requests.RequestException as e:
+                if attempt == 3:
+                    raise
+                wait = 2 ** attempt
+                print(f"  Token refresh attempt {attempt} failed ({e}), retrying in {wait}s...")
+                time.sleep(wait)
 
     def get_access_token(self):
         if not self.tokens or self.is_token_expired():
@@ -162,8 +177,12 @@ class SchwabAPIClient:
         webbrowser.open(auth_url)
         print("After logging in, paste the full redirected URL here:")
         redirected_url = input().strip()
-        # Extract code from URL
-        code = redirected_url.split("code=")[1].split("%40")[0] + "@"
+        # Extract code from redirect URL safely
+        parsed = urlparse(redirected_url)
+        params = parse_qs(parsed.query)
+        if "code" not in params:
+            raise ValueError(f"No 'code' parameter found in redirect URL: {redirected_url}")
+        code = params["code"][0]
 
         credentials = f"{self.app_key}:{self.app_secret}"
         b64_credentials = base64.b64encode(credentials.encode()).decode()
@@ -256,7 +275,7 @@ class SchwabAPIClient:
         end = end.strftime("%Y-%m-%d")
         start = start.strftime("%Y-%m-%d")
 
-        path = f"{data_dir}/{symbol}-{str(end).rstrip()}.pkl"
+        path = f"{data_dir}/{symbol}-{end}.pkl"
 
         if os.path.exists(path):
             return
@@ -281,16 +300,18 @@ class SchwabAPIClient:
             params["endDate"] = int(endDate)
 
         res = requests.get(url, headers=headers, params=params)
-        data = res.json()
-
-        if "candles" in res.json():
-            df = pd.DataFrame(data["candles"])
-
-            with open(path, "wb") as f:
-                pickle.dump(df, f)
-            print(f"{symbol} data saved")
+        try:
+            res.raise_for_status()
+            data = res.json()
+        except Exception as e:
+            print(f"  ⚠ {symbol}: API error — {e}")
             return
 
-        else:
-            print(f"no data from {symbol}")
+        if "candles" not in data:
+            print(f"  ⚠ {symbol}: no candle data in response — {data}")
             return
+
+        df = pd.DataFrame(data["candles"])
+        with open(path, "wb") as f:
+            pickle.dump(df, f)
+        print(f"{symbol} data saved")

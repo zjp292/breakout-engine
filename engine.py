@@ -570,15 +570,15 @@ class Features:
             daily_performances = {}
 
             for symbol, df in stock_dfs.items():
-                if date in df.index:
-                    # Use 60-day % change as the ranking metric
-                    perf = (
-                        df.loc[date, "close"] / df["close"].shift(60).loc[date] - 1
-                        if date in df.index
-                        else None
-                    )
-                    if perf is not None and not pd.isna(perf):
-                        daily_performances[symbol] = perf
+                if date not in df.index:
+                    continue
+                # Use 60-day % change as the ranking metric
+                denom = df["close"].shift(60).loc[date]
+                if pd.isna(denom) or denom == 0:
+                    continue  # insufficient history or data error — skip this bar
+                perf = df.loc[date, "close"] / denom - 1
+                if not pd.isna(perf):
+                    daily_performances[symbol] = perf
 
             # Rank the stocks (percentile)
             if daily_performances:
@@ -1317,10 +1317,11 @@ class Scoring:
         volume_score, volume_details = self.score_volume_profile(row)
         rr_score, rr_details = self.score_risk_reward(row)
 
-        # Total score, adjusted by market regime multiplier
-        # In a downtrend (0.70-0.85x), even good setups score lower — matching
-        # how both Qullamaggie and Minervini become much more selective in weak markets
-        total = (base_score + trend_score + rs_score + volume_score + rr_score) * self.regime_multiplier
+        # raw_total reflects pure setup quality — unaffected by market regime.
+        # total is regime-gated: in a downtrend (0.50-0.85x), even great setups
+        # score lower, matching how Qullamaggie and Minervini go selective in weak markets.
+        raw_total = base_score + trend_score + rs_score + volume_score + rr_score
+        total = raw_total * self.regime_multiplier
 
         # Combine all details
         all_details = {
@@ -1337,6 +1338,7 @@ class Scoring:
             relative_strength=rs_score,
             volume_profile=volume_score,
             risk_reward=rr_score,
+            raw_total=raw_total,
             total=total,
             details=all_details,
         )
@@ -1454,7 +1456,8 @@ class Scoring:
         df["score_relative_strength"] = 0.0
         df["score_volume_profile"] = 0.0
         df["score_risk_reward"] = 0.0
-        df["total_score"] = 0.0
+        df["raw_score"] = 0.0   # pre-regime-multiplier — used for grading setup quality
+        df["total_score"] = 0.0  # regime-adjusted — used for ranking and action signals
         df["grade"] = ""
         df["signal"] = ""
         df["passes_filters"] = False
@@ -1479,8 +1482,13 @@ class Scoring:
             df.at[idx, "score_relative_strength"] = breakdown.relative_strength
             df.at[idx, "score_volume_profile"] = breakdown.volume_profile
             df.at[idx, "score_risk_reward"] = breakdown.risk_reward
+            df.at[idx, "raw_score"] = breakdown.raw_total
             df.at[idx, "total_score"] = breakdown.total
-            df.at[idx, "grade"] = self.get_grade(breakdown.total)
+            # Grade reflects pure setup quality — independent of market regime.
+            # A bull-market-grade setup should still show A+ even in a downtrend.
+            df.at[idx, "grade"] = self.get_grade(breakdown.raw_total)
+            # Signal is regime-gated — STRONG BUY requires both a great setup AND
+            # a supportive market.
             df.at[idx, "signal"] = self.get_signal_strength(breakdown.total)
 
         return df

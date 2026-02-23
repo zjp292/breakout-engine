@@ -9,7 +9,7 @@ Reports produced:
   5. Scoring weight suggestions     — which weights deserve more / less emphasis?
 
 Requires scan + outcome data from persistence.py / outcome_tracker.py.
-The analysis becomes meaningful after ~3–4 weeks of scans and outcomes.
+The analysis becomes meaningful after ~3-4 weeks of scans and outcomes.
 Scoring weight suggestions should not be acted on until 50+ outcomes exist.
 
 Run directly:
@@ -24,7 +24,7 @@ import pandas as pd
 
 from persistence import ScanPersistence
 
-W = 70   # report width
+W = 70  # report width
 
 
 class PerformanceAnalyzer:
@@ -35,9 +35,9 @@ class PerformanceAnalyzer:
 
     def run(self, min_outcomes: int = 5) -> None:
         """Run the full analysis suite and print results to stdout."""
-        scans    = self.db.load_scans()
+        scans = self.db.load_scans()
         outcomes = self.db.load_outcomes()
-        mc       = self.db.load_market_conditions()
+        mc = self.db.load_market_conditions()
 
         if outcomes.empty:
             print(
@@ -94,7 +94,7 @@ class PerformanceAnalyzer:
             ("A   80–89 ", 80, 90),
             ("B   70–79 ", 70, 80),
             ("C   60–69 ", 60, 70),
-            ("D   <60   ",  0, 60),
+            ("D   <60   ", 0, 60),
         ]
 
         print(
@@ -107,7 +107,7 @@ class PerformanceAnalyzer:
             sub = passed[(passed["score"] >= lo) & (passed["score"] < hi)]
             if sub.empty:
                 continue
-            n   = len(sub)
+            n = len(sub)
             print(
                 f"  {label:10s}  {n:>4}"
                 f"  {sub['breakout_triggered'].mean() * 100:>8.0f}%"
@@ -136,15 +136,18 @@ class PerformanceAnalyzer:
         _divider()
 
         regime_order = ["BULL", "UPTREND", "MIXED", "CAUTION", "DOWNTREND"]
-        multipliers  = {
-            "BULL": "×1.00", "UPTREND": "×0.95", "MIXED": "×0.85",
-            "CAUTION": "×0.70", "DOWNTREND": "×0.50",
+        multipliers = {
+            "BULL": "×1.00",
+            "UPTREND": "×0.95",
+            "MIXED": "×0.85",
+            "CAUTION": "×0.70",
+            "DOWNTREND": "×0.50",
         }
         for regime in regime_order:
             sub = passed[passed["mc_regime"] == regime]
             if sub.empty:
                 continue
-            n   = len(sub)
+            n = len(sub)
             print(
                 f"  {regime:12s}  {n:>4}"
                 f"  {sub['breakout_triggered'].mean() * 100:>8.0f}%"
@@ -164,17 +167,21 @@ class PerformanceAnalyzer:
 
         # Features to evaluate: (column, human label, interpretation note)
         features = [
-            ("score",                  "Total score",            ""),
-            ("base_quality",           "Base quality",           ""),
-            ("trend_strength",         "Trend strength",         ""),
-            ("relative_strength_score","Relative strength",      ""),
-            ("volume_score",           "Volume profile",         ""),
-            ("rr_score",               "Risk/reward",            ""),
-            ("rs_comp_60",             "RS vs COMP 60d",         "higher = stronger leader"),
-            ("vcp_contraction_ratio",  "VCP contraction ratio",  "lower = tighter base"),
-            ("pct_from_52wk_high",     "% from 52wk high",       "less negative = closer to high"),
-            ("prior_move_pct",         "Prior move %",           ""),
-            ("adr_pct",                "ADR %",                  ""),
+            ("score", "Total score", ""),
+            ("base_quality", "Base quality", ""),
+            ("trend_strength", "Trend strength", ""),
+            ("relative_strength_score", "Relative strength", ""),
+            ("volume_score", "Volume profile", ""),
+            ("rr_score", "Risk/reward", ""),
+            ("rs_comp_60", "RS vs COMP 60d", "higher = stronger leader"),
+            ("vcp_contraction_ratio", "VCP contraction ratio", "lower = tighter base"),
+            (
+                "pct_from_52wk_high",
+                "% from 52wk high",
+                "less negative = closer to high",
+            ),
+            ("prior_move_pct", "Prior move %", ""),
+            ("adr_pct", "ADR %", ""),
         ]
 
         rows = []
@@ -195,7 +202,7 @@ class PerformanceAnalyzer:
         _divider()
         for label, corr, n, note in rows:
             filled = int(abs(corr) * 10)
-            bar    = ("▲" if corr > 0 else "▼") + "█" * filled + "░" * (10 - filled)
+            bar = ("▲" if corr > 0 else "▼") + "█" * filled + "░" * (10 - filled)
             print(f"  {label:28s}  {corr:>+.3f}  {bar}  {n:<4} {note}")
 
     # ── Report 4: Filter effectiveness ───────────────────────────────────────
@@ -255,9 +262,9 @@ class PerformanceAnalyzer:
         _divider()
 
         for filter_name, group in failed_outcomes.groupby("inferred_filter"):
-            n        = len(group)
-            avg_chg  = group["pct_change"].mean() * 100
-            avg_max  = group["max_gain_20d"].mean() * 100
+            n = len(group)
+            avg_chg = group["pct_change"].mean() * 100
+            avg_max = group["max_gain_20d"].mean() * 100
             if baseline_max20 is not None and avg_max > baseline_max20 * 0.8:
                 verdict = "⚠  reconsider — similar gains to passing stocks"
             else:
@@ -283,15 +290,15 @@ class PerformanceAnalyzer:
 
         # Map: display name → (db column, current weight in config.py)
         weight_map = [
-            ("base_quality",      "base_quality",           25),
-            ("trend_strength",    "trend_strength",         30),
-            ("relative_strength", "relative_strength_score",25),
-            ("volume_profile",    "volume_score",           10),
-            ("risk_reward",       "rr_score",               10),
+            ("base_quality", "base_quality", 25),
+            ("trend_strength", "trend_strength", 30),
+            ("relative_strength", "relative_strength_score", 25),
+            ("volume_profile", "volume_score", 10),
+            ("risk_reward", "rr_score", 10),
         ]
 
         target = passed["max_gain_20d"].fillna(0)
-        corrs  = {}
+        corrs = {}
         for name, col, current in weight_map:
             if col not in passed.columns:
                 continue
@@ -319,9 +326,9 @@ class PerformanceAnalyzer:
 
         for name, (abs_corr, current) in corrs.items():
             suggested = round((abs_corr / total_corr) * 100)
-            diff      = suggested - current
-            diff_str  = f"({diff:+d})" if abs(diff) >= 3 else "—"
-            bar       = "█" * int(abs_corr * 20)
+            diff = suggested - current
+            diff_str = f"({diff:+d})" if abs(diff) >= 3 else "—"
+            bar = "█" * int(abs_corr * 20)
             print(
                 f"  {name:22s}  {current:>7}pt  "
                 f"  {abs_corr:>.3f}  {bar:<10}  "
@@ -343,6 +350,7 @@ class PerformanceAnalyzer:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _header(title: str) -> None:
     print(f"\n  {'─' * (W - 2)}")
     print(f"  {title}")
@@ -356,19 +364,20 @@ def _divider() -> None:
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Analyse historical scan performance"
-    )
+    parser = argparse.ArgumentParser(description="Analyse historical scan performance")
     parser.add_argument(
-        "--min-outcomes", type=int, default=5,
+        "--min-outcomes",
+        type=int,
+        default=5,
         help="Minimum joined scan+outcome rows required (default: 5)",
     )
     parser.add_argument(
-        "--db", default="results/breakout.db",
+        "--db",
+        default="results/breakout.db",
         help="Path to SQLite database (default: results/breakout.db)",
     )
     args = parser.parse_args()
 
-    db       = ScanPersistence(db_path=args.db)
+    db = ScanPersistence(db_path=args.db)
     analyzer = PerformanceAnalyzer(db)
     analyzer.run(min_outcomes=args.min_outcomes)

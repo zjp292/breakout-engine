@@ -176,12 +176,15 @@ class OutcomeTracker:
             target_reached = bool((high >= target_level).any())
 
         # ── Gain / drawdown at fixed windows ─────────────────────────────────
+        # Use intraday high/low, not close — a stock that spikes 20% intraday
+        # then closes +5% should show +20% gain; a stop-out at the low of day
+        # should show the actual drawdown, not the gentler close-to-close figure.
         def max_gain(n: int) -> Optional[float]:
-            w = close.iloc[:n]
+            w = high.iloc[:n]
             return float((w.max() - entry_price) / entry_price) if not w.empty else None
 
         def max_drawdown(n: int) -> Optional[float]:
-            w = close.iloc[:n]
+            w = low.iloc[:n]
             return float((w.min() - entry_price) / entry_price) if not w.empty else None
 
         current_price = float(close.iloc[-1])

@@ -47,6 +47,7 @@ class ScanPersistence:
 
                     -- Scoring (NULL for stocks that failed hard filters)
                     score                   REAL,
+                    raw_score               REAL,
                     grade                   TEXT,
                     signal                  TEXT,
                     base_quality            REAL,
@@ -142,6 +143,13 @@ class ScanPersistence:
                 CREATE INDEX IF NOT EXISTS idx_outcomes_scan ON outcomes(scan_date, symbol);
             """)
 
+        # Schema migration: add raw_score to existing databases that predate this column
+        with self._connect() as conn:
+            try:
+                conn.execute("ALTER TABLE scans ADD COLUMN raw_score REAL")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
     # ── Write ────────────────────────────────────────────────────────────────
 
     def save_scan(
@@ -194,6 +202,7 @@ class ScanPersistence:
                 "symbol":                  symbol,
                 "passes_filters":          int(passes),
                 "score":                   s("total_score"),
+                "raw_score":               s("raw_score"),
                 "grade":                   row.get("grade")  if passes else None,
                 "signal":                  row.get("signal") if passes else None,
                 "base_quality":            s("score_base_quality"),
@@ -238,7 +247,7 @@ class ScanPersistence:
             conn.executemany("""
                 INSERT OR REPLACE INTO scans (
                     scan_date, symbol, passes_filters,
-                    score, grade, signal,
+                    score, raw_score, grade, signal,
                     base_quality, trend_strength, relative_strength_score,
                     volume_score, rr_score,
                     price, breakout_level, stop_level, target_level,
@@ -251,7 +260,7 @@ class ScanPersistence:
                     market_regime, market_score, regime_multiplier
                 ) VALUES (
                     :scan_date, :symbol, :passes_filters,
-                    :score, :grade, :signal,
+                    :score, :raw_score, :grade, :signal,
                     :base_quality, :trend_strength, :relative_strength_score,
                     :volume_score, :rr_score,
                     :price, :breakout_level, :stop_level, :target_level,
