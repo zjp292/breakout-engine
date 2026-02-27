@@ -15,6 +15,7 @@ class Engine:
         self.spy_df = None          # S&P 500 — multi-index confirmation
         self.iwm_df = None          # Russell 2000 — small-cap breadth
         self.market_condition = None  # MarketConditionResult from last run
+        self.macro_regime = None      # MacroRegimeResult — sustained environment
 
     def load_pickle(self, file):
         with open(file, "rb") as f:
@@ -63,40 +64,71 @@ class Engine:
 
     def analyze_market_condition(self, feature_dfs: dict) -> float:
         """
-        Run the multi-factor market condition analysis and return the regime multiplier.
+        Run both the daily market condition analysis and the macro regime analysis,
+        then return a blended regime multiplier.
 
-        Replaces the old simple SMA-based _get_regime_multiplier() with a
-        comprehensive 100-point scoring system covering:
-          · Index trend quality (SMA alignment + slope + SPY/IWM confirmation)
-          · Distribution day count (rolling 25-session window)
-          · Follow-through day recency and validity
-          · Internal breadth (watchlist stocks above 50 SMA, in Stage 2, near highs)
-          · Market momentum and realized volatility
+        Two complementary layers:
 
-        Sets self.market_condition (MarketConditionResult) for downstream use.
-        Returns the regime_multiplier (0.50–1.00).
+        1. MarketConditionAnalyzer (100-pt score → 0.50–1.00 multiplier)
+           Short-term health: distribution days, follow-through days, SMA alignment,
+           internal breadth of watchlist stocks, 21-day momentum.
+           Window: roughly the last 4–6 weeks of activity.
+
+        2. MacroRegimeAnalyzer (direction × quality → 0.60–1.00 multiplier)
+           Sustained macro environment: Choppiness Index, ADX, R², Hurst Exponent,
+           multi-timeframe momentum confluence, volatility regime, price structure.
+           Window: 3–12 months — captures "choppy since October"-style regimes.
+
+        Combined multiplier (weighted blend):
+          final = 0.55 × daily_multiplier + 0.45 × macro_multiplier
+
+        The daily analysis stays reactive to current conditions; the macro prevents
+        over-sizing during sustained unfavorable periods even when a single day looks OK.
+
+        Sets self.market_condition and self.macro_regime for downstream use.
+        Returns the final blended multiplier (0.50–1.00).
         """
         from market_condition import MarketConditionAnalyzer
+        from macro_regime import MacroRegimeAnalyzer
 
         if not self.config.get("market_regime", True):
             self.market_condition = None
+            self.macro_regime     = None
             return 1.0
 
         if self.benchmark_df is None:
             self.market_condition = None
+            self.macro_regime     = None
             return 1.0
 
-        analyzer = MarketConditionAnalyzer(self.config)
-        result   = analyzer.analyze(
+        # ── Layer 1: daily market condition ───────────────────────────────
+        mc_analyzer = MarketConditionAnalyzer(self.config)
+        mc_result   = mc_analyzer.analyze(
             compx_df          = self.benchmark_df,
             spy_df            = self.spy_df,
             iwm_df            = self.iwm_df,
             stock_feature_dfs = feature_dfs,
         )
+        self.market_condition = mc_result
+        self._print_market_condition(mc_result)
 
-        self.market_condition = result
-        self._print_market_condition(result)
-        return result.regime_multiplier
+        # ── Layer 2: macro regime ─────────────────────────────────────────
+        macro_analyzer = MacroRegimeAnalyzer(self.config)
+        macro_result   = macro_analyzer.analyze(
+            compx_df = self.benchmark_df,
+            spy_df   = self.spy_df,
+            iwm_df   = self.iwm_df,
+        )
+        self.macro_regime = macro_result
+        self._print_macro_regime(macro_result)
+
+        # ── Blended multiplier ────────────────────────────────────────────
+        daily_mult = mc_result.regime_multiplier
+        macro_mult = macro_result.macro_multiplier
+        blended    = round(0.55 * daily_mult + 0.45 * macro_mult, 3)
+
+        # Floor at 0.50 to match existing system behaviour
+        return max(0.50, blended)
 
     def _print_market_condition(self, mc) -> None:
         """Print a formatted market condition report to stdout."""
@@ -175,6 +207,128 @@ class Engine:
         )
 
         print(bar + "\n")
+
+    def _print_macro_regime(self, mr) -> None:
+        """Print a formatted macro regime report to stdout."""
+        W   = 66
+        bar = "═" * W
+
+        direction_badges = {
+            "BULLISH": "▲ BULLISH",
+            "NEUTRAL": "↔ NEUTRAL",
+            "BEARISH": "▼ BEARISH",
+        }
+        quality_badges = {
+            "TRENDING":      "TRENDING",
+            "TRANSITIONING": "TRANSITIONING",
+            "CHOPPY":        "CHOPPY ⚠",
+        }
+        vol_badges = {
+            "CALM":     "CALM",
+            "NORMAL":   "NORMAL",
+            "ELEVATED": "ELEVATED ⚠",
+            "EXTREME":  "EXTREME ⛔",
+        }
+
+        dir_str = direction_badges.get(mr.trend_direction, mr.trend_direction)
+        qlt_str = quality_badges.get(mr.trend_quality,    mr.trend_quality)
+        vol_str = vol_badges.get(mr.vol_regime,            mr.vol_regime)
+
+        print(f"{bar}")
+        print("  MACRO REGIME ANALYSIS  (3-12 month sustained environment)")
+        print(bar)
+        print(
+            f"  {mr.regime_label:<18s}  {dir_str}  ×  {qlt_str}"
+            f"   →  ×{mr.macro_multiplier:.2f}"
+        )
+        print(f"  Vol regime: {vol_str}")
+        print(f"  {'─' * (W - 4)}")
+
+        # ── Direction signals ─────────────────────────────────────────────
+        dir_bar = self._sparkbar(mr.direction_score, lo=-1.0, hi=1.0, width=20)
+        print(
+            f"  Direction score   {mr.direction_score:+.3f}  {dir_bar}"
+            f"  [{mr.trend_direction}]"
+        )
+        print(
+            f"    Mom confluence  {mr.mom_confluence:+.2f}"
+            f"   [21d {mr.mom_21d*100:+.1f}%"
+            f"  63d {mr.mom_63d*100:+.1f}%"
+            f"  126d {mr.mom_126d*100:+.1f}%"
+            f"  252d {mr.mom_252d*100:+.1f}%]"
+        )
+        di_dir = "▲" if mr.plus_di > mr.minus_di else "▼"
+        print(
+            f"    ADX direction   {di_dir}  +DI {mr.plus_di:.1f}"
+            f"  −DI {mr.minus_di:.1f}"
+            f"   Reg slope (63d) {mr.reg_slope_63d*100:+.1f}%/yr"
+        )
+
+        # ── Quality signals ───────────────────────────────────────────────
+        qlt_bar = self._sparkbar(mr.quality_score, lo=0.0, hi=1.0, width=20)
+        print(
+            f"  Quality score     {mr.quality_score:.3f}  {qlt_bar}"
+            f"  [{mr.trend_quality}]"
+        )
+        ci_flag = "  ⚠ choppy" if mr.choppiness_14 > 61.8 else (
+                  "  ✓ trending" if mr.choppiness_14 < 38.2 else ""
+        )
+        print(
+            f"    Choppiness(14)  {mr.choppiness_14:.1f}{ci_flag}"
+            f"   Choppiness(50) {mr.choppiness_50:.1f}"
+        )
+        adx_note = "no trend" if mr.adx_14 < 20 else (
+                   "weak trend" if mr.adx_14 < 25 else (
+                   "trending"   if mr.adx_14 < 40 else "strong trend"))
+        print(
+            f"    ADX(14)         {mr.adx_14:.1f}  [{adx_note}]"
+            f"   R²(63d) {mr.reg_r2_63d:.2f}"
+        )
+        hurst_note = (
+            "trending/persistent" if mr.hurst > 0.55 else
+            "mean-reverting"      if mr.hurst < 0.45 else
+            "random walk"
+        )
+        print(f"    Hurst exp       {mr.hurst:.3f}  [{hurst_note}]")
+
+        # ── Volatility ────────────────────────────────────────────────────
+        vr_flag = "  ⚠ expanding" if mr.vol_rising else ""
+        print(
+            f"  Volatility        {vol_str}"
+            f"   10d {mr.vol_10d*100:.1f}%"
+            f"  60d {mr.vol_60d*100:.1f}%"
+            f"  ratio ×{mr.vol_ratio:.2f}{vr_flag}"
+        )
+
+        # ── Price structure ───────────────────────────────────────────────
+        spy_str = (
+            "SPY ✓" if mr.spy_above_200 is True else
+            "SPY ✗" if mr.spy_above_200 is False else
+            "SPY –"
+        )
+        iwm_str = (
+            "IWM ✓" if mr.iwm_above_200 is True else
+            "IWM ✗" if mr.iwm_above_200 is False else
+            "IWM –"
+        )
+        print(
+            f"  3-month range     {mr.range_width_pct*100:.1f}%"
+            f"   {abs(mr.pct_from_swing_high)*100:.1f}% below swing high"
+            f"   {spy_str}  {iwm_str}"
+        )
+
+        print(bar + "\n")
+
+    @staticmethod
+    def _sparkbar(value: float, lo: float, hi: float, width: int = 20) -> str:
+        """
+        Render a simple ASCII progress bar showing where `value` falls in [lo, hi].
+        E.g. value=0.3, lo=-1, hi=1, width=20 → '[──────────●─────────]'
+        """
+        frac     = max(0.0, min(1.0, (value - lo) / (hi - lo)))
+        pos      = int(round(frac * (width - 1)))
+        bar_body = "─" * pos + "●" + "─" * (width - 1 - pos)
+        return f"[{bar_body}]"
 
     def process_stock(self, date_str=None, debug=False):
         if date_str is None:

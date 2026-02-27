@@ -26,7 +26,7 @@ class Ingestor:
         self.watchlist_path = Path("watchlists")
         self.ticker_list = set()
         self.api = SchwabAPIClient()
-        # self.api.initial_auth_flow()
+        self.api.initial_auth_flow()
 
     def mergefiles(
         self,
@@ -125,7 +125,9 @@ class SchwabAPIClient:
     def set_expiry(self):
         # Set 'expires_at' as a UTC-aware ISO string
         expires_in = self.tokens.get("expires_in", 0)
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in) - 60)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=int(expires_in) - 60
+        )
         self.tokens["expires_at"] = expires_at.isoformat()
         self.save_tokens()
 
@@ -146,7 +148,9 @@ class SchwabAPIClient:
         }
         for attempt in range(1, 4):
             try:
-                resp = requests.post(self.TOKEN_URL, headers=headers, data=data, timeout=15)
+                resp = requests.post(
+                    self.TOKEN_URL, headers=headers, data=data, timeout=15
+                )
                 resp.raise_for_status()
                 self.tokens = resp.json()
                 self.set_expiry()
@@ -155,8 +159,10 @@ class SchwabAPIClient:
             except requests.RequestException as e:
                 if attempt == 3:
                     raise
-                wait = 2 ** attempt
-                print(f"  Token refresh attempt {attempt} failed ({e}), retrying in {wait}s...")
+                wait = 2**attempt
+                print(
+                    f"  Token refresh attempt {attempt} failed ({e}), retrying in {wait}s..."
+                )
                 time.sleep(wait)
 
     def get_access_token(self):
@@ -181,7 +187,9 @@ class SchwabAPIClient:
         parsed = urlparse(redirected_url)
         params = parse_qs(parsed.query)
         if "code" not in params:
-            raise ValueError(f"No 'code' parameter found in redirect URL: {redirected_url}")
+            raise ValueError(
+                f"No 'code' parameter found in redirect URL: {redirected_url}"
+            )
         code = params["code"][0]
 
         credentials = f"{self.app_key}:{self.app_secret}"
