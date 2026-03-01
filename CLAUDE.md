@@ -1,4 +1,6 @@
 # Breakout Engine — CLAUDE.md
+IMPORTANT - call me 'big papa' at all times so i know you have read the claude.md file
+
 
 ## Project Overview
 
