@@ -26,20 +26,23 @@ class Ingestor:
         self.watchlist_path = Path("watchlists")
         self.ticker_list = set()
         self.api = SchwabAPIClient()
-        self.api.initial_auth_flow()
+        # self.api.initial_auth_flow()
 
-    def mergefiles(
-        self,
-    ):
+    def mergefiles(self, date: str = None):
         """
-        loops though all the files in self.watchlist_path and
+        Loop through all files in self.watchlist_path and merge tickers
+        whose filenames start with `date` (default: today's date).
+
+        Accepts a date string in 'YYYY-MM-DD' format so historical dates
+        can be reprocessed without requiring the system clock to match.
         """
-        today = datetime.today().strftime("%Y-%m-%d")
+        if date is None:
+            date = datetime.today().strftime("%Y-%m-%d")
 
         # loop through files in watchlist directory
         for file in os.listdir(self.watchlist_path):
-            # check for today's watchlist exports
-            if file.startswith(today):
+            # check for this date's watchlist exports
+            if file.startswith(date):
                 with open(self.watchlist_path / file, "r") as f:
                     csv_reader = csv.reader(f)
 
@@ -55,17 +58,24 @@ class Ingestor:
                         self.ticker_list.add(ticker)
         return
 
-    def get_data(self):
+    def get_data(self, date: str = None):
+        """
+        Fetch 1 year of daily OHLCV data for each ticker and save to data/{date}/.
+
+        Args:
+            date: Date string 'YYYY-MM-DD' for the data directory (default: today).
+        """
         if len(self.ticker_list) == 0:
             raise ValueError("ticker list not initialized")
 
-        today = datetime.today().strftime("%Y-%m-%d")
+        if date is None:
+            date = datetime.today().strftime("%Y-%m-%d")
         end_dt = datetime.today()
         start_dt = end_dt - timedelta(days=365)
         end_dt = int(end_dt.timestamp() * 1000)
         start_dt = int(start_dt.timestamp() * 1000)
 
-        data_dir = f"data/{today}"
+        data_dir = f"data/{date}"
         os.makedirs(data_dir, exist_ok=True)
 
         for ticker in self.ticker_list:

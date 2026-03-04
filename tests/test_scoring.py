@@ -61,7 +61,7 @@ def make_row(**overrides) -> pd.Series:
         # --- 52-week proximity ---
         "pct_from_52wk_high": -0.05,    # 5% below high (near breakout)
         # --- Consolidation ---
-        "consol_range_15": 0.04,        # 4% range — tight but not extreme
+        "consol_range_60": 0.04,        # 4% range — tight but not extreme
         "consol_days": 10,              # sweet-spot flag length
         # --- VCP ---
         "vcp_contracting": True,
@@ -103,7 +103,7 @@ def make_ideal_row() -> pd.Series:
     """
     return make_row(
         # base_quality → 25
-        consol_range_15=0.01,          # tightness = 10
+        consol_range_60=0.01,          # tightness = 10
         consol_days=10,                # length = 8
         vcp_contracting=True,
         vcp_contraction_ratio=0.20,    # vcp = 7
@@ -162,7 +162,7 @@ class TestScoreBaseQuality:
         (1.00,   0.0),  # default missing value
     ])
     def test_tightness(self, consol_range, expected):
-        row = make_row(consol_range_15=consol_range, consol_days=10,
+        row = make_row(consol_range_60=consol_range, consol_days=10,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, details = self.scoring.score_base_quality(row)
         assert details["tightness"] == expected, (
@@ -189,7 +189,7 @@ class TestScoreBaseQuality:
         (90,  1.0),   # way too long
     ])
     def test_base_length(self, days, expected):
-        row = make_row(consol_range_15=0.04, consol_days=days,
+        row = make_row(consol_range_60=0.04, consol_days=days,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, details = self.scoring.score_base_quality(row)
         assert details["base_length"] == expected, (
@@ -212,7 +212,7 @@ class TestScoreBaseQuality:
         (False, 1.00, 0.0),   # flat
     ])
     def test_vcp_contraction(self, contracting, ratio, expected):
-        row = make_row(consol_range_15=0.04, consol_days=10,
+        row = make_row(consol_range_60=0.04, consol_days=10,
                        vcp_contracting=contracting, vcp_contraction_ratio=ratio)
         score, details = self.scoring.score_base_quality(row)
         assert details["vcp_contraction"] == expected, (
@@ -221,14 +221,14 @@ class TestScoreBaseQuality:
 
     def test_max_score_is_25(self):
         """Perfect base: tightest range + sweet-spot length + strongest VCP."""
-        row = make_row(consol_range_15=0.01, consol_days=10,
+        row = make_row(consol_range_60=0.01, consol_days=10,
                        vcp_contracting=True, vcp_contraction_ratio=0.20)
         score, _ = self.scoring.score_base_quality(row)
         assert score == 25.0
 
     def test_min_score_is_0(self):
         """Worst possible base: loose range, no days, no VCP."""
-        row = make_row(consol_range_15=0.20, consol_days=0,
+        row = make_row(consol_range_60=0.20, consol_days=0,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, _ = self.scoring.score_base_quality(row)
         assert score == 0.0
@@ -995,7 +995,7 @@ class TestCalculateTotalScore:
         assert 0.0 <= ideal.total <= 100.0
 
         worst = make_row(
-            consol_range_15=1.0, consol_days=0,
+            consol_range_60=1.0, consol_days=0,
             stage2=False, distance_from_sma150=-0.50, distance_from_sma200=-0.50,
             pct_from_52wk_high=-0.99, ma_alignment=False, mas_rising=False,
             sma_10=40.0, sma_20=41.0, prior_move_pct=0.0, days_since_power_move=999,

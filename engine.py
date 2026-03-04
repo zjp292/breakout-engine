@@ -341,14 +341,14 @@ class Engine:
             from ingestion import Ingestor
 
             ingestor = Ingestor()
-            ingestor.mergefiles()
+            ingestor.mergefiles(date=date_str)
 
             if not ingestor.ticker_list:
-                print("No tickers found in today's watchlist exports. Exiting.")
+                print(f"No tickers found in watchlist exports for {date_str}. Exiting.")
                 return {}, None
 
             print(f"Fetching data for {len(ingestor.ticker_list)} tickers...")
-            ingestor.get_data()
+            ingestor.get_data(date=date_str)
 
         pickle_files = list(data_dir.glob("*.pkl"))
 
@@ -522,7 +522,8 @@ class Features:
             df["distance_from_sma200"] = (df["close"] - df["sma_200"]) / df["sma_200"]
             sma200_slope = df["sma_200"].pct_change(periods=20)
             df["stage2"] = (
-                (df["close"] > df["sma_150"])
+                (df["close"] > df["sma_50"])
+                & (df["close"] > df["sma_150"])
                 & (df["sma_50"] > df["sma_150"])
                 & (df["sma_150"] > df["sma_200"])
                 & (sma200_slope > 0)
@@ -701,52 +702,48 @@ class Features:
         Calculate RS rank (percentile) for each stock vs the entire watchlist.
         This shows which stocks are the strongest performers relative to peers.
 
+        Vectorized implementation: builds a price matrix (dates × symbols), computes
+        rs_rank_window-day returns for all stocks simultaneously, then ranks across
+        stocks for each date in a single pandas call.  Reduces O(N_stocks × N_dates)
+        Python loops to a handful of vectorized operations.
+
         Args:
             stock_dfs: Dict of {symbol: dataframe} for all stocks in watchlist
-            benchmark_df: Optional benchmark dataframe
+            benchmark_df: Optional benchmark dataframe (unused; kept for API compat)
 
         Returns:
-            Dict of {symbol: {date: rs_rank}} where rs_rank is 0-100 percentile
+            Dict of {symbol: {date: rs_rank}} where rs_rank is 0–100 percentile
         """
-        # For each date, calculate all stocks' performance and rank them
-        # This needs to be called at the Engine level with all stocks
+        rs_window = self.config.get("rs_rank_window", 60)
 
-        # Get common dates across all stocks
-        all_dates = set()
-        for df in stock_dfs.values():
-            all_dates.update(df.index)
-        all_dates = sorted(all_dates)
+        # Build a price matrix: rows=dates, columns=symbols
+        price_matrix = pd.DataFrame(
+            {symbol: df["close"] for symbol, df in stock_dfs.items()}
+        )
 
-        rs_ranks = {symbol: {} for symbol in stock_dfs.keys()}
+        # rs_window-period returns for all stocks in one vectorized step
+        returns = price_matrix.pct_change(periods=rs_window)
 
-        # For each date, rank stocks by their 60-day performance
-        for date in all_dates:
-            daily_performances = {}
+        # Rank across stocks for each date; pct=True gives [0, 1] → scale to [0, 100]
+        # na_option="keep" leaves dates with insufficient history as NaN
+        ranks = returns.rank(axis=1, pct=True, na_option="keep") * 100
 
-            for symbol, df in stock_dfs.items():
-                if date not in df.index:
-                    continue
-                # Use 60-day % change as the ranking metric
-                denom = df["close"].shift(60).loc[date]
-                if pd.isna(denom) or denom == 0:
-                    continue  # insufficient history or data error — skip this bar
-                perf = df.loc[date, "close"] / denom - 1
-                if not pd.isna(perf):
-                    daily_performances[symbol] = perf
-
-            # Rank the stocks (percentile)
-            if daily_performances:
-                sorted_symbols = sorted(daily_performances.items(), key=lambda x: x[1])
-                for rank, (symbol, _) in enumerate(sorted_symbols):
-                    percentile = (rank / len(sorted_symbols)) * 100
-                    rs_ranks[symbol][date] = percentile
+        # Convert matrix back to the dict-of-dicts format expected by callers
+        rs_ranks = {}
+        for symbol in stock_dfs:
+            if symbol in ranks.columns:
+                rs_ranks[symbol] = ranks[symbol].dropna().to_dict()
+            else:
+                rs_ranks[symbol] = {}
 
         return rs_ranks
 
     # big move up before consolidation
-    def detect_prior_moves(self, df, lookback=60):
+    def detect_prior_moves(self, df, lookback=None):
         # prior_move_pct: max % gain in lookback period
         # days_since_power_move: days since 20%+ move
+        if lookback is None:
+            lookback = self.config.get("prior_move_window", 60)
         rolling_low = df["low"].rolling(window=lookback).min()
         df["prior_move_pct"] = (df["close"] - rolling_low) / rolling_low
 
@@ -813,34 +810,38 @@ class Features:
         Detect Volatility Contraction Pattern (VCP) structure.
 
         Minervini's VCP requires a series of contractions, each narrower than the last.
-        We measure range over three successive windows (10, 20, 40 days) as a proxy.
-        True VCP: range_10 < range_20 < range_40 (each window tighter than the next).
+        We measure range over three successive windows (short/medium/long, from config)
+        as a proxy. True VCP: range_short < range_medium < range_long.
+
+        Config key: "vcp_windows" (default [10, 20, 40])
 
         Returns df with:
-        - range_10/20/40: price range as % of close for each window
+        - range_{short/medium/long}: price range as % of close for each window
         - vcp_contracting: True if all three windows show progressive narrowing
-        - vcp_contraction_ratio: current 10d range / 40d range (lower = tighter)
+        - vcp_contraction_ratio: current short-range / long-range (lower = tighter)
         """
-        range_10 = (
-            df["high"].rolling(10).max() - df["low"].rolling(10).min()
+        w_short, w_medium, w_long = self.config.get("vcp_windows", [10, 20, 40])
+
+        range_short = (
+            df["high"].rolling(w_short).max() - df["low"].rolling(w_short).min()
         ) / df["close"]
-        range_20 = (
-            df["high"].rolling(20).max() - df["low"].rolling(20).min()
+        range_medium = (
+            df["high"].rolling(w_medium).max() - df["low"].rolling(w_medium).min()
         ) / df["close"]
-        range_40 = (
-            df["high"].rolling(40).max() - df["low"].rolling(40).min()
+        range_long = (
+            df["high"].rolling(w_long).max() - df["low"].rolling(w_long).min()
         ) / df["close"]
 
-        df["range_10"] = range_10
-        df["range_20"] = range_20
-        df["range_40"] = range_40
+        df[f"range_{w_short}"] = range_short
+        df[f"range_{w_medium}"] = range_medium
+        df[f"range_{w_long}"] = range_long
 
         # True VCP: each successive window is progressively tighter
-        df["vcp_contracting"] = (range_10 < range_20) & (range_20 < range_40)
+        df["vcp_contracting"] = (range_short < range_medium) & (range_medium < range_long)
 
         # How tight is the current range vs the broadest recent window?
-        # 0.20 means current 10d range is only 20% of the 40d range = strong contraction
-        df["vcp_contraction_ratio"] = range_10 / range_40.clip(lower=0.001)
+        # 0.20 means current short range is only 20% of the long range = strong contraction
+        df["vcp_contraction_ratio"] = range_short / range_long.clip(lower=0.001)
 
         return df
 
@@ -900,7 +901,8 @@ class Features:
         # Aggressive: 2x the base depth or prior move high
 
         # Method 1: Target based on consolidation range projection
-        consol_range_pct = df.get("consol_range_15", pd.Series([0.05] * len(df)))
+        consol_range_key = f"consol_range_{self.config.get('base_length_max', 60)}"
+        consol_range_pct = df.get(consol_range_key, pd.Series([0.05] * len(df)))
         if isinstance(consol_range_pct, (int, float)):
             consol_range_pct = pd.Series([consol_range_pct] * len(df), index=df.index)
         base_target_1 = df["close"] * (1 + consol_range_pct)
@@ -962,7 +964,7 @@ class Features:
         df = self.detect_vcp_contractions(df)
 
         # Volume patterns
-        df = self.detect_volume_drying(df, lookback=10)
+        df = self.detect_volume_drying(df, lookback=self.config.get("volume_dryup_window", 10))
 
         # Risk/Reward (NEW)
         df = self.calculate_stop(df)
@@ -1038,7 +1040,8 @@ class Scoring:
 
         # 1. CONSOLIDATION TIGHTNESS (0-10 points)
         # The tighter the base, the more energy coiled for the breakout
-        consol_range = row.get("consol_range_15", 1.0)
+        consol_range_key = f"consol_range_{self.config.get('base_length_max', 60)}"
+        consol_range = row.get(consol_range_key, 1.0)
 
         if consol_range <= 0.02:    # <2% — exceptional (VCP handle)
             tightness_score = 10.0
@@ -1690,7 +1693,7 @@ class Scoring:
                     "stop_distance": row["stop_distance_pct"],
                     "potential_r": row["potential_r"],
                     "base_days": row["consol_days"],
-                    "base_range_%": round(row.get("consol_range_15", 0) * 100, 1),
+                    "base_range_%": round(row.get(f"consol_range_{self.config.get('base_length_max', 60)}", 0) * 100, 1),
                     "pct_from_52wk_hi": round(row.get("pct_from_52wk_high", 0) * 100, 1),
                     "stage2": row.get("stage2", False),
                     "vcp": row.get("vcp_contracting", False),

@@ -137,10 +137,11 @@ class ScanPersistence:
                     iwm_above_200           INTEGER
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_scans_date    ON scans(scan_date);
-                CREATE INDEX IF NOT EXISTS idx_scans_symbol  ON scans(symbol);
-                CREATE INDEX IF NOT EXISTS idx_scans_score   ON scans(score DESC);
-                CREATE INDEX IF NOT EXISTS idx_outcomes_scan ON outcomes(scan_date, symbol);
+                CREATE INDEX IF NOT EXISTS idx_scans_date     ON scans(scan_date);
+                CREATE INDEX IF NOT EXISTS idx_scans_symbol   ON scans(symbol);
+                CREATE INDEX IF NOT EXISTS idx_scans_score    ON scans(score DESC);
+                CREATE INDEX IF NOT EXISTS idx_scans_filtered ON scans(passes_filters);
+                CREATE INDEX IF NOT EXISTS idx_outcomes_scan  ON outcomes(scan_date, symbol);
             """)
 
         # Schema migration: add raw_score to existing databases that predate this column
@@ -191,11 +192,11 @@ class ScanPersistence:
             def s(col):
                 return self._safe_float(row, col) if passes else None
 
-            # consol_range column name varies with config-driven lookback window
-            consol_range = (
-                self._safe_float(row, "consol_range_60")
-                or self._safe_float(row, "consol_range_15")
-            )
+            # consol_range column name varies with config-driven lookback window.
+            # Use explicit None check — 0.0 (extremely tight base) must not be treated as falsy.
+            consol_range = self._safe_float(row, "consol_range_60")
+            if consol_range is None:
+                consol_range = self._safe_float(row, "consol_range_15")
 
             records.append({
                 "scan_date":               date_str,

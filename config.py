@@ -1,6 +1,7 @@
 PARAMETERS = {
     # base
     "base_length_min": 3,
+    "vcp_windows": [10, 20, 40],             # VCP range comparison windows (short, medium, long)
     "base_length_max": 60,
     "base_length_optimal": (5, 15),
     "range_compression_threshold": 0.05,
@@ -14,8 +15,12 @@ PARAMETERS = {
     "volume_avg_period": 20,
     "volume_surge_multiplier": 1.5,
     "dollar_volume_min": 10_000_000,
+    "volume_dryup_window": 10,               # Lookback for volume dry-up detection
     # relative strength
     "rs_lookback_periods": [20, 60, 120],
+    "rs_rank_window": 60,                    # Period used for peer RS rank calculation
+    # prior move
+    "prior_move_window": 60,                 # Lookback for prior power-move detection
     # risk
     "stop_loss_max_pct": 0.08,
     "risk_reward_min": 3.0,
