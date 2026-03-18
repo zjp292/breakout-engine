@@ -26,7 +26,7 @@ class Ingestor:
         self.watchlist_path = Path("watchlists")
         self.ticker_list = set()
         self.api = SchwabAPIClient()
-        # self.api.initial_auth_flow()
+        # self.api.initial_auth_flow() # use this as first time auth
 
     def mergefiles(self, date: str = None):
         """
@@ -90,6 +90,7 @@ class Ingestor:
                 needExtendedHoursData=False,
             )
 
+    # TODO - event driven price moves, get events from the fcc/news
     def get_events(self, date: str = None):
         pass
 

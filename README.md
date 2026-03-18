@@ -1,10 +1,10 @@
 # Breakout Engine
 
-A daily stock-scanning engine that identifies high-probability breakout setups using Kristjan Qullamaggie's VCP flag breakouts and Mark Minervini's Stage 2 SEPA template. It ingests watchlist exports from ThinkOrSwim, fetches historical OHLCV data via the Schwab API, computes technical features, scores each stock on a 100-point system, analyzes broad market health, and persists results to SQLite for backtesting and continuous improvement.
+A daily stock-scanning engine that identifies high-probability breakout setups using Kristjan Qullamaggie's breakouts and Mark Minervini's Stage 2 SEPA template. It ingests watchlist csv exports from ThinkOrSwim, fetches historical OHLCV data via the Schwab API, computes technical features, scores each stock on a 100-point system, analyzes broad market health, and persists results to SQLite for backtesting and continuous improvement.
 
 ## Why This Exists
 
-Most retail screeners spit out hundreds of stocks that "look like" breakouts. The problem is that they don't account for base quality, volume contraction, relative strength leadership, or market regime — all things that Qullamaggie and Minervini stress constantly. This engine scores every setup across those dimensions and applies a market regime multiplier so that even a perfect chart gets downgraded when the market environment is hostile.
+I wanted a way to easily sort through my scanner's output to get the top stocks to watch. Without this, I spent a lot of time sifting through my watchlist to find stocks that looked only okay. Now, with this tool, I can quantify price action based on a strict set of rules without my emotions getting in the way. This tool is a small part of the stock discovery process. 
 
 The scoring weights were calibrated against 793 real outcome observations, correlating each component with actual 20-day forward returns.
 
