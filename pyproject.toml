@@ -1,7 +1,7 @@
 [project]
 name = "breakout-engine"
 version = "0.1.0"
-description = "Add your description here"
+description = "Daily stock scanner for high-probability breakout setups using Qullamaggie VCP and Minervini Stage 2 methodology"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

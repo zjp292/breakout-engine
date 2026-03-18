@@ -90,6 +90,9 @@ class Ingestor:
                 needExtendedHoursData=False,
             )
 
+    def get_events(self, date: str = None):
+        pass
+
 
 class SchwabAPIClient:
     """

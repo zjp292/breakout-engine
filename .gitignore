@@ -2,3 +2,10 @@
 schwab_tokens.json
 data/
 __pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+results/
+watchlists/
+CLAUDE.md
+IMPROVEMENTS.md

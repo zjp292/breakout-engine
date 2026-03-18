@@ -80,7 +80,7 @@ def make_row(**overrides) -> pd.Series:
         "rs_comp_20": 0.06,
         "rs_comp_60": 0.12,
         # --- Risk / reward ---
-        "stop_distance_pct": 0.08,     # 8% stop / 8% ADR = 1.0× — ideal
+        "stop_distance_pct": 0.08,     # 8% stop / 8% ADR = 1.0x — ideal
         "stop_level": 46.0,
         "potential_r": 3.5,
         "potential_gain_pct": 0.28,
@@ -93,40 +93,40 @@ def make_ideal_row() -> pd.Series:
     """
     Row engineered to achieve the maximum possible raw score of 100.
 
-    Component maxima:
-      base_quality      10 + 8 + 7  = 25
-      trend_strength    10 + 8 + 7 + 5 = 30
-      relative_strength  7 + 10 + 8 = 25
-      volume_profile     3 + 4 + 3  = 10
-      risk_reward        7 + 3      = 10
+    Component maxima (rebalanced 2026-03):
+      base_quality       6 + 5 + 4  = 15
+      trend_strength     5 + 4 + 3 + 3 = 15
+      relative_strength  8 + 12 + 10 = 30
+      volume_profile     6 + 10 + 9 = 25
+      risk_reward       10 + 5      = 15
       TOTAL                         = 100
     """
     return make_row(
-        # base_quality → 25
-        consol_range_60=0.01,          # tightness = 10
-        consol_days=10,                # length = 8
+        # base_quality -> 15
+        consol_range_60=0.01,          # tightness = 6
+        consol_days=10,                # length = 5
         vcp_contracting=True,
-        vcp_contraction_ratio=0.20,    # vcp = 7
-        # trend_strength → 30
-        stage2=True,                   # stage = 10
-        pct_from_52wk_high=-0.03,      # proximity = 8
+        vcp_contraction_ratio=0.20,    # vcp = 4
+        # trend_strength -> 15
+        stage2=True,                   # stage = 5
+        pct_from_52wk_high=-0.03,      # proximity = 4
         ma_alignment=True,
         mas_rising=True,
-        distance_from_sma10=0.02,      # above_10sma + aligned + rising = 7
+        distance_from_sma10=0.02,      # above_10sma + aligned + rising = 3
         prior_move_pct=0.50,
-        days_since_power_move=15,      # power_move = 5
-        # relative_strength → 25 (rs_rank handled via score call)
-        rs_comp_20=0.15,               # rs_20 = 7
-        rs_comp_60=0.25,               # rs_60 = 10
-        # volume_profile → 10
-        dollar_volume=150_000_000,     # dv = 3  (≥10× min)
+        days_since_power_move=15,      # power_move = 3
+        # relative_strength -> 30 (rs_rank handled via score call)
+        rs_comp_20=0.15,               # rs_20 = 8
+        rs_comp_60=0.25,               # rs_60 = 12
+        # volume_profile -> 25
+        dollar_volume=150_000_000,     # dv = 6  (>= 10x min)
         volume_declining=True,
-        volume_dryup_ratio=0.50,       # vd = 4  (< 0.60)
-        adr_pct=0.12,                  # adr = 3  (≥ 10%)
-        # risk_reward → 10
-        # stop 0.06 / adr 0.12 = 0.5× → stop_score = 7
+        volume_dryup_ratio=0.50,       # vd = 10 (< 0.60)
+        adr_pct=0.12,                  # adr = 9  (>= 10%)
+        # risk_reward -> 15
+        # stop 0.06 / adr 0.12 = 0.5x -> stop_score = 10
         stop_distance_pct=0.06,
-        potential_r=6.0,               # r_score = 3
+        potential_r=6.0,               # r_score = 5
     )
 
 
@@ -137,10 +137,10 @@ def make_ideal_row() -> pd.Series:
 class TestScoreBaseQuality:
     """
     score_base_quality() decomposes into three independent sub-scores:
-      - Consolidation tightness  (0–10 pts)
-      - Base length              (0–8 pts)
-      - VCP contraction series   (0–7 pts)
-    Max total = 25.
+      - Consolidation tightness  (0-6 pts)
+      - Base length              (0-5 pts)
+      - VCP contraction series   (0-4 pts)
+    Max total = 15.
     """
 
     scoring = make_scoring()
@@ -148,25 +148,25 @@ class TestScoreBaseQuality:
     # --- 1a. Tightness thresholds ---
 
     @pytest.mark.parametrize("consol_range, expected", [
-        (0.00,  10.0),  # extreme edge — well below 2%
-        (0.01,  10.0),  # < 2%
-        (0.02,  10.0),  # boundary: exactly 2%
-        (0.021,  9.0),  # just over 2%, within 3%
-        (0.03,   9.0),  # boundary: exactly 3%
-        (0.031,  7.0),  # just over 3%, within 5%
-        (0.05,   7.0),  # boundary: exactly 5%
-        (0.051,  4.0),  # just over 5%, within 8%
-        (0.08,   4.0),  # boundary: exactly 8%
-        (0.081,  0.0),  # just over 8% — too loose
-        (0.20,   0.0),  # very loose
-        (1.00,   0.0),  # default missing value
+        (0.00,  6.0),  # extreme edge
+        (0.01,  6.0),  # < 2%
+        (0.02,  6.0),  # boundary: exactly 2%
+        (0.021, 5.0),  # just over 2%, within 3%
+        (0.03,  5.0),  # boundary: exactly 3%
+        (0.031, 4.0),  # just over 3%, within 5%
+        (0.05,  4.0),  # boundary: exactly 5%
+        (0.051, 2.0),  # just over 5%, within 8%
+        (0.08,  2.0),  # boundary: exactly 8%
+        (0.081, 0.0),  # just over 8% — too loose
+        (0.20,  0.0),  # very loose
+        (1.00,  0.0),  # default missing value
     ])
     def test_tightness(self, consol_range, expected):
         row = make_row(consol_range_60=consol_range, consol_days=10,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, details = self.scoring.score_base_quality(row)
         assert details["tightness"] == expected, (
-            f"consol_range={consol_range} → expected tightness {expected}, got {details['tightness']}"
+            f"consol_range={consol_range} -> expected tightness {expected}, got {details['tightness']}"
         )
 
     # --- 1b. Base length thresholds ---
@@ -174,40 +174,40 @@ class TestScoreBaseQuality:
     @pytest.mark.parametrize("days, expected", [
         (0,   0.0),   # < 3 — no base
         (2,   0.0),   # < 3
-        (3,   5.0),   # micro-flag lower bound
-        (4,   5.0),   # micro-flag
-        (5,   8.0),   # sweet-spot lower bound
-        (10,  8.0),   # sweet-spot middle
-        (15,  8.0),   # sweet-spot upper boundary
-        (16,  7.0),   # classic VCP
-        (30,  7.0),   # classic VCP upper boundary
-        (31,  6.0),   # longer VCP
-        (45,  6.0),   # longer VCP upper boundary
-        (46,  3.0),   # extended
-        (60,  3.0),   # extended upper boundary
-        (61,  1.0),   # too long
-        (90,  1.0),   # way too long
+        (3,   2.5),   # micro-flag lower bound
+        (4,   2.5),   # micro-flag
+        (5,   5.0),   # sweet-spot lower bound
+        (10,  5.0),   # sweet-spot middle
+        (15,  5.0),   # sweet-spot upper boundary
+        (16,  4.0),   # classic VCP
+        (30,  4.0),   # classic VCP upper boundary
+        (31,  3.0),   # longer VCP
+        (45,  3.0),   # longer VCP upper boundary
+        (46,  1.5),   # extended
+        (60,  1.5),   # extended upper boundary
+        (61,  0.5),   # too long
+        (90,  0.5),   # way too long
     ])
     def test_base_length(self, days, expected):
         row = make_row(consol_range_60=0.04, consol_days=days,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, details = self.scoring.score_base_quality(row)
         assert details["base_length"] == expected, (
-            f"consol_days={days} → expected length {expected}, got {details['base_length']}"
+            f"consol_days={days} -> expected length {expected}, got {details['base_length']}"
         )
 
     # --- 1c. VCP contraction thresholds ---
 
     @pytest.mark.parametrize("contracting, ratio, expected", [
-        (True,  0.10, 7.0),   # very strong (ratio ≤ 0.25)
-        (True,  0.25, 7.0),   # boundary
-        (True,  0.26, 5.0),   # just over 0.25
-        (True,  0.40, 5.0),   # boundary (≤ 0.40)
-        (True,  0.41, 3.0),   # contracting but modest
-        (True,  0.80, 3.0),   # contracting, high ratio
-        (True,  0.99, 3.0),   # contracting, ratio close to 1
-        (False, 0.50, 1.0),   # not contracting, partial contraction
-        (False, 0.60, 1.0),   # boundary (≤ 0.60)
+        (True,  0.10, 4.0),   # very strong (ratio <= 0.25)
+        (True,  0.25, 4.0),   # boundary
+        (True,  0.26, 3.0),   # just over 0.25
+        (True,  0.40, 3.0),   # boundary (<= 0.40)
+        (True,  0.41, 2.0),   # contracting but modest
+        (True,  0.80, 2.0),   # contracting, high ratio
+        (True,  0.99, 2.0),   # contracting, ratio close to 1
+        (False, 0.50, 0.5),   # not contracting, partial contraction
+        (False, 0.60, 0.5),   # boundary (<= 0.60)
         (False, 0.61, 0.0),   # flat or expanding
         (False, 1.00, 0.0),   # flat
     ])
@@ -216,15 +216,15 @@ class TestScoreBaseQuality:
                        vcp_contracting=contracting, vcp_contraction_ratio=ratio)
         score, details = self.scoring.score_base_quality(row)
         assert details["vcp_contraction"] == expected, (
-            f"contracting={contracting}, ratio={ratio} → expected vcp {expected}, got {details['vcp_contraction']}"
+            f"contracting={contracting}, ratio={ratio} -> expected vcp {expected}, got {details['vcp_contraction']}"
         )
 
-    def test_max_score_is_25(self):
+    def test_max_score_is_15(self):
         """Perfect base: tightest range + sweet-spot length + strongest VCP."""
         row = make_row(consol_range_60=0.01, consol_days=10,
                        vcp_contracting=True, vcp_contraction_ratio=0.20)
         score, _ = self.scoring.score_base_quality(row)
-        assert score == 25.0
+        assert score == 15.0
 
     def test_min_score_is_0(self):
         """Worst possible base: loose range, no days, no VCP."""
@@ -237,7 +237,7 @@ class TestScoreBaseQuality:
         """Missing optional fields should not raise — defaults yield a finite score."""
         row = pd.Series({"close": 50.0})  # only close, everything else missing
         score, details = self.scoring.score_base_quality(row)
-        assert 0.0 <= score <= 25.0
+        assert 0.0 <= score <= 15.0
 
 
 # ===========================================================================
@@ -247,11 +247,11 @@ class TestScoreBaseQuality:
 class TestScoreTrendStrength:
     """
     score_trend_strength() decomposes into four sub-scores:
-      - Stage 2 MA structure   (0–10 pts)
-      - 52-wk high proximity   (0–8 pts)
-      - Short-term MA stack    (0–7 pts)
-      - Prior power move       (0–5 pts)
-    Max total = 30.
+      - Stage 2 MA structure   (0-5 pts)
+      - 52-wk high proximity   (0-4 pts)
+      - Short-term MA stack    (0-3 pts)
+      - Prior power move       (0-3 pts)
+    Max total = 15.
     """
 
     scoring = make_scoring()
@@ -261,36 +261,36 @@ class TestScoreTrendStrength:
     def test_stage2_full(self):
         row = make_row(stage2=True)
         _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 10.0
+        assert d["stage2"] == 5.0
 
     def test_stage2_price_above_both_long_smas(self):
-        """dist_150 > 0, dist_200 > 0, but stage2=False → 6 pts."""
+        """dist_150 > 0, dist_200 > 0, but stage2=False -> 3 pts."""
         row = make_row(stage2=False, distance_from_sma150=0.05, distance_from_sma200=0.10)
         _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 6.0
+        assert d["stage2"] == 3.0
 
     def test_stage2_above_200_only(self):
-        """dist_150 ≤ 0, dist_200 > 0 → 3 pts."""
+        """dist_150 <= 0, dist_200 > 0 -> 1.5 pts."""
         row = make_row(stage2=False, distance_from_sma150=-0.02, distance_from_sma200=0.05)
         _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 3.0
+        assert d["stage2"] == 1.5
 
     def test_stage2_nan_150_with_dist200_positive(self):
-        """dist_150 is NaN but dist_200 > 0 → 3 pts (second elif)."""
+        """dist_150 is NaN but dist_200 > 0 -> 1.5 pts (second elif)."""
         row = make_row(stage2=False, distance_from_sma150=np.nan, distance_from_sma200=0.05)
         _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 3.0
+        assert d["stage2"] == 1.5
 
     def test_stage2_nan_150_ma_aligned(self):
-        """Insufficient history (dist_150=NaN, dist_200=NaN), but MAs aligned → 4 pts."""
+        """Insufficient history (dist_150=NaN, dist_200=NaN), but MAs aligned -> 2 pts."""
         row = make_row(stage2=False,
                        distance_from_sma150=np.nan, distance_from_sma200=np.nan,
                        ma_alignment=True)
         _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 4.0
+        assert d["stage2"] == 2.0
 
     def test_stage2_nan_150_not_aligned(self):
-        """Insufficient history and MAs not aligned → 0 pts."""
+        """Insufficient history and MAs not aligned -> 0 pts."""
         row = make_row(stage2=False,
                        distance_from_sma150=np.nan, distance_from_sma200=np.nan,
                        ma_alignment=False)
@@ -298,15 +298,14 @@ class TestScoreTrendStrength:
         assert d["stage2"] == 0.0
 
     def test_stage2_below_both_long_smas(self):
-        """Below 150 and 200 SMA → 0 pts."""
+        """Below 150 and 200 SMA -> 0 pts."""
         row = make_row(stage2=False,
                        distance_from_sma150=-0.05, distance_from_sma200=-0.10)
         _, d = self.scoring.score_trend_strength(row)
         assert d["stage2"] == 0.0
 
     def test_stage2_above_150_below_200(self):
-        """dist_150 > 0 but dist_200 < 0 → first elif fails (needs both > 0),
-        second elif also fails (dist_200 ≤ 0) → else → 0 pts."""
+        """dist_150 > 0 but dist_200 < 0 -> 0 pts."""
         row = make_row(stage2=False,
                        distance_from_sma150=0.05, distance_from_sma200=-0.03)
         _, d = self.scoring.score_trend_strength(row)
@@ -315,17 +314,17 @@ class TestScoreTrendStrength:
     # --- 2b. 52-week high proximity ---
 
     @pytest.mark.parametrize("pct_from_high, expected", [
-        ( 0.00, 8.0),   # at the 52wk high
-        (-0.03, 8.0),   # within 5%
-        (-0.05, 8.0),   # boundary: exactly -5%
-        (-0.06, 7.0),   # just below -5%, within -10%
-        (-0.10, 7.0),   # boundary: exactly -10%
-        (-0.11, 5.0),   # within -15%
-        (-0.15, 5.0),   # boundary: exactly -15%
-        (-0.16, 3.0),   # within -20%
-        (-0.20, 3.0),   # boundary: exactly -20%
-        (-0.21, 1.0),   # within -25%
-        (-0.25, 1.0),   # boundary: exactly -25%
+        ( 0.00, 4.0),   # at the 52wk high
+        (-0.03, 4.0),   # within 5%
+        (-0.05, 4.0),   # boundary: exactly -5%
+        (-0.06, 3.5),   # just below -5%, within -10%
+        (-0.10, 3.5),   # boundary: exactly -10%
+        (-0.11, 2.5),   # within -15%
+        (-0.15, 2.5),   # boundary: exactly -15%
+        (-0.16, 1.5),   # within -20%
+        (-0.20, 1.5),   # boundary: exactly -20%
+        (-0.21, 0.5),   # within -25%
+        (-0.25, 0.5),   # boundary: exactly -25%
         (-0.26, 0.0),   # >25% below
         (-0.50, 0.0),   # far below
     ])
@@ -333,17 +332,17 @@ class TestScoreTrendStrength:
         row = make_row(pct_from_52wk_high=pct_from_high)
         _, d = self.scoring.score_trend_strength(row)
         assert d["proximity_to_high"] == expected, (
-            f"pct_from_high={pct_from_high} → expected {expected}, got {d['proximity_to_high']}"
+            f"pct_from_high={pct_from_high} -> expected {expected}, got {d['proximity_to_high']}"
         )
 
     # --- 2c. Short-term MA structure ---
 
     @pytest.mark.parametrize("ma_alignment, mas_rising, dist_10, expected", [
-        (True,  True,   0.02,  7.0),   # perfect: aligned + rising + above
-        (True,  True,  -0.02,  7.0),   # at -2% = boundary for above_10sma
-        (True,  True,  -0.025, 5.0),   # aligned + rising, but below 10 SMA
-        (True,  False,  0.02,  4.0),   # aligned + above but not rising
-        (True,  False, -0.05,  2.0),   # aligned only
+        (True,  True,   0.02,  3.0),   # perfect: aligned + rising + above
+        (True,  True,  -0.02,  3.0),   # at -2% = boundary for above_10sma
+        (True,  True,  -0.025, 2.0),   # aligned + rising, but below 10 SMA
+        (True,  False,  0.02,  1.5),   # aligned + above but not rising
+        (True,  False, -0.05,  1.0),   # aligned only
         (False, False,  0.05,  0.0),   # poor structure — need sma_10 > sma_20 check
     ])
     def test_ma_structure(self, ma_alignment, mas_rising, dist_10, expected):
@@ -355,23 +354,23 @@ class TestScoreTrendStrength:
         assert d["ma_structure"] == expected
 
     def test_ma_partial_alignment_10_above_20(self):
-        """sma_10 > sma_20 but ma_alignment=False → 1 pt."""
+        """sma_10 > sma_20 but ma_alignment=False -> 0.5 pt."""
         row = make_row(ma_alignment=False, mas_rising=False,
                        sma_10=50.0, sma_20=48.0)
         _, d = self.scoring.score_trend_strength(row)
-        assert d["ma_structure"] == 1.0
+        assert d["ma_structure"] == 0.5
 
     # --- 2d. Prior power move ---
 
     @pytest.mark.parametrize("prior_move, days_since, expected", [
-        (0.40, 30,  5.0),   # 40%+ and within 30 days
-        (0.40, 31,  4.0),   # 40% but 31 days → falls to 30%+ tier (≤45d)
-        (0.50, 30,  5.0),   # 50%+ within 30 days
-        (0.30, 45,  4.0),   # 30%+ within 45 days
-        (0.30, 46,  3.0),   # 30% but 46 days → falls to 20%+ tier (≤60d)
-        (0.20, 60,  3.0),   # 20%+ within 60 days
-        (0.20, 61,  1.5),   # 20% but 61 days → >= 15% tier (no day limit)
-        (0.15, 999, 1.5),   # 15%+ modest (no recency requirement)
+        (0.40, 30,  3.0),   # 40%+ and within 30 days
+        (0.40, 31,  2.5),   # 40% but 31 days -> falls to 30%+ tier (<=45d)
+        (0.50, 30,  3.0),   # 50%+ within 30 days
+        (0.30, 45,  2.5),   # 30%+ within 45 days
+        (0.30, 46,  2.0),   # 30% but 46 days -> falls to 20%+ tier (<=60d)
+        (0.20, 60,  2.0),   # 20%+ within 60 days
+        (0.20, 61,  1.0),   # 20% but 61 days -> >= 15% tier (no day limit)
+        (0.15, 999, 1.0),   # 15%+ modest (no recency requirement)
         (0.14, 999, 0.0),   # below 15% — no meaningful prior move
         (0.00, 999, 0.0),   # no move
     ])
@@ -379,10 +378,10 @@ class TestScoreTrendStrength:
         row = make_row(prior_move_pct=prior_move, days_since_power_move=days_since)
         _, d = self.scoring.score_trend_strength(row)
         assert d["prior_power_move"] == expected, (
-            f"prior_move={prior_move}, days={days_since} → expected {expected}, got {d['prior_power_move']}"
+            f"prior_move={prior_move}, days={days_since} -> expected {expected}, got {d['prior_power_move']}"
         )
 
-    def test_max_score_is_30(self):
+    def test_max_score_is_15(self):
         """Ideal trend: Stage 2, within 5% of high, perfect MAs, 50% move."""
         row = make_row(
             stage2=True,
@@ -391,7 +390,7 @@ class TestScoreTrendStrength:
             prior_move_pct=0.50, days_since_power_move=15,
         )
         score, _ = self.scoring.score_trend_strength(row)
-        assert score == 30.0
+        assert score == 15.0
 
     def test_min_score_is_0(self):
         """Worst trend: below all MAs, far from high, no prior move."""
@@ -400,7 +399,7 @@ class TestScoreTrendStrength:
             distance_from_sma150=-0.10, distance_from_sma200=-0.15,
             pct_from_52wk_high=-0.60,
             ma_alignment=False, mas_rising=False,
-            sma_10=45.0, sma_20=46.0,   # sma10 < sma20 → no partial credit
+            sma_10=45.0, sma_20=46.0,   # sma10 < sma20 -> no partial credit
             prior_move_pct=0.05, days_since_power_move=999,
         )
         score, _ = self.scoring.score_trend_strength(row)
@@ -414,10 +413,10 @@ class TestScoreTrendStrength:
 class TestScoreRelativeStrength:
     """
     score_relative_strength() decomposes into:
-      - 20-day RS  (0–7 pts)
-      - 60-day RS  (0–10 pts)
-      - RS rank    (0–8 pts, only when rs_rank supplied)
-    Max total = 25.
+      - 20-day RS  (0-8 pts)
+      - 60-day RS  (0-12 pts)
+      - RS rank    (0-10 pts, only when rs_rank supplied)
+    Max total = 30.
     """
 
     scoring = make_scoring()
@@ -425,14 +424,14 @@ class TestScoreRelativeStrength:
     # --- 3a. 20-day RS thresholds ---
 
     @pytest.mark.parametrize("rs_20, expected", [
-        ( 0.10, 7.0),   # +10%+ exceptional
-        ( 0.15, 7.0),   # above 10%
-        ( 0.05, 5.0),   # +5–10%
-        ( 0.10 - 1e-9, 5.0),  # just under 10%
-        ( 0.02, 3.0),   # +2–5%
-        ( 0.05 - 1e-9, 3.0),  # just under 5%
-        ( 0.00, 1.0),   # neutral
-        ( 0.02 - 1e-9, 1.0),  # just under 2%
+        ( 0.10, 8.0),   # +10%+ exceptional
+        ( 0.15, 8.0),   # above 10%
+        ( 0.05, 6.0),   # +5-10%
+        ( 0.10 - 1e-9, 6.0),  # just under 10%
+        ( 0.02, 4.0),   # +2-5%
+        ( 0.05 - 1e-9, 4.0),  # just under 5%
+        ( 0.00, 1.5),   # neutral
+        ( 0.02 - 1e-9, 1.5),  # just under 2%
         (-0.01, 0.0),   # underperforming
         (-0.20, 0.0),   # deeply underperforming
     ])
@@ -444,16 +443,16 @@ class TestScoreRelativeStrength:
     # --- 3b. 60-day RS thresholds ---
 
     @pytest.mark.parametrize("rs_60, expected", [
-        ( 0.20, 10.0),
-        ( 0.30, 10.0),
-        ( 0.15, 8.0),
-        ( 0.20 - 1e-9, 8.0),
-        ( 0.10, 6.0),
-        ( 0.15 - 1e-9, 6.0),
-        ( 0.05, 4.0),
-        ( 0.10 - 1e-9, 4.0),
-        ( 0.00, 1.0),
-        ( 0.05 - 1e-9, 1.0),
+        ( 0.20, 12.0),
+        ( 0.30, 12.0),
+        ( 0.15, 10.0),
+        ( 0.20 - 1e-9, 10.0),
+        ( 0.10, 8.0),
+        ( 0.15 - 1e-9, 8.0),
+        ( 0.05, 5.0),
+        ( 0.10 - 1e-9, 5.0),
+        ( 0.00, 1.5),
+        ( 0.05 - 1e-9, 1.5),
         (-0.01, 0.0),
         (-0.30, 0.0),
     ])
@@ -465,15 +464,15 @@ class TestScoreRelativeStrength:
     # --- 3c. RS rank percentile ---
 
     @pytest.mark.parametrize("rs_rank, expected", [
-        (90.0, 8.0),   # top 10%
-        (95.0, 8.0),
-        (80.0, 6.0),   # top 20%
-        (89.9, 6.0),
-        (70.0, 4.0),   # top 30%
-        (79.9, 4.0),
-        (60.0, 2.0),   # top 40%
-        (69.9, 2.0),
-        (59.9, 0.0),   # below 60th percentile
+        (90.0, 10.0),   # top 10%
+        (95.0, 10.0),
+        (80.0, 8.0),    # top 20%
+        (89.9, 8.0),
+        (70.0, 6.0),    # top 30%
+        (79.9, 6.0),
+        (60.0, 3.0),    # top 40%
+        (69.9, 3.0),
+        (59.9, 0.0),    # below 60th percentile
         ( 0.0, 0.0),
     ])
     def test_rs_rank(self, rs_rank, expected):
@@ -487,10 +486,10 @@ class TestScoreRelativeStrength:
         score, d = self.scoring.score_relative_strength(row, rs_rank=None)
         assert d["rs_rank"] == 0.0
 
-    def test_max_score_is_25(self):
+    def test_max_score_is_30(self):
         row = make_row(rs_comp_20=0.15, rs_comp_60=0.25)
         score, _ = self.scoring.score_relative_strength(row, rs_rank=95.0)
-        assert score == 25.0
+        assert score == 30.0
 
     def test_min_score_is_0(self):
         row = make_row(rs_comp_20=-0.20, rs_comp_60=-0.30)
@@ -505,10 +504,10 @@ class TestScoreRelativeStrength:
 class TestScoreVolumeProfile:
     """
     score_volume_profile() decomposes into:
-      - Dollar volume      (0–3 pts)
-      - Volume dry-up      (0–4 pts) — single source of truth
-      - ADR %              (0–3 pts)
-    Max total = 10.
+      - Dollar volume      (0-6 pts)
+      - Volume dry-up      (0-10 pts) — single source of truth
+      - ADR %              (0-9 pts)
+    Max total = 25.
     """
 
     scoring = make_scoring()
@@ -517,14 +516,14 @@ class TestScoreVolumeProfile:
     # --- 4a. Dollar volume ---
 
     @pytest.mark.parametrize("dollar_vol, expected", [
-        (MIN_DV * 10,     3.0),   # ≥ $100M
-        (MIN_DV * 10 + 1, 3.0),
-        (MIN_DV * 5,      2.5),   # ≥ $50M
-        (MIN_DV * 10 - 1, 2.5),
-        (MIN_DV * 2,      2.0),   # ≥ $20M
-        (MIN_DV * 5 - 1,  2.0),
-        (MIN_DV,          1.5),   # meets minimum ($10M)
-        (MIN_DV * 2 - 1,  1.5),
+        (MIN_DV * 10,     6.0),   # >= $100M
+        (MIN_DV * 10 + 1, 6.0),
+        (MIN_DV * 5,      5.0),   # >= $50M
+        (MIN_DV * 10 - 1, 5.0),
+        (MIN_DV * 2,      4.0),   # >= $20M
+        (MIN_DV * 5 - 1,  4.0),
+        (MIN_DV,          2.5),   # meets minimum ($10M)
+        (MIN_DV * 2 - 1,  2.5),
         (MIN_DV - 1,      0.0),   # below minimum
         (0,               0.0),
     ])
@@ -537,39 +536,38 @@ class TestScoreVolumeProfile:
     # --- 4b. Volume dry-up ---
 
     @pytest.mark.parametrize("declining, ratio, expected", [
-        (True,  0.50, 4.0),   # very strong (ratio < 0.60)
-        (True,  0.59, 4.0),
-        (True,  0.60, 3.0),   # solid (0.60 ≤ ratio < 0.75)
-        (True,  0.74, 3.0),
-        (True,  0.75, 2.0),   # moderate (0.75 ≤ ratio < 0.90)
-        (True,  0.89, 2.0),
-        # declining=True, ratio=0.90: none of the first three elif branches match
-        # (all require ratio < 0.90), so falls to `elif ratio < 1.0` → 1.0
-        (True,  0.90, 1.0),   # declining, ratio exactly 0.90 → 1 pt (falls to generic branch)
-        (False, 0.70, 1.0),   # not declining but ratio < 1.0
-        (False, 0.99, 1.0),   # not declining but ratio just below 1
-        (False, 1.00, 0.0),   # no contraction at all
-        (False, 1.20, 0.0),   # expanding volume
+        (True,  0.50, 10.0),   # very strong (ratio < 0.60)
+        (True,  0.59, 10.0),
+        (True,  0.60,  7.5),   # solid (0.60 <= ratio < 0.75)
+        (True,  0.74,  7.5),
+        (True,  0.75,  5.0),   # moderate (0.75 <= ratio < 0.90)
+        (True,  0.89,  5.0),
+        # declining=True, ratio=0.90: falls to `elif ratio < 1.0` -> 2.5
+        (True,  0.90,  2.5),
+        (False, 0.70,  2.5),   # not declining but ratio < 1.0
+        (False, 0.99,  2.5),   # not declining but ratio just below 1
+        (False, 1.00,  0.0),   # no contraction at all
+        (False, 1.20,  0.0),   # expanding volume
     ])
     def test_volume_dryup(self, declining, ratio, expected):
         row = make_row(dollar_volume=0, adr_pct=0.0,
                        volume_declining=declining, volume_dryup_ratio=ratio)
         score, d = self.scoring.score_volume_profile(row)
         assert d["volume_contraction"] == expected, (
-            f"declining={declining}, ratio={ratio} → expected {expected}, got {d['volume_contraction']}"
+            f"declining={declining}, ratio={ratio} -> expected {expected}, got {d['volume_contraction']}"
         )
 
     # --- 4c. ADR % ---
 
     @pytest.mark.parametrize("adr_pct, expected", [
-        (0.10, 3.0),    # 10%+ high-octane
-        (0.15, 3.0),
-        (0.08, 2.5),    # 8%+
-        (0.10 - 1e-9, 2.5),
-        (0.06, 2.0),    # 6%+
-        (0.08 - 1e-9, 2.0),
-        (0.05, 1.0),    # at minimum (5%)
-        (0.06 - 1e-9, 1.0),
+        (0.10, 9.0),    # 10%+ high-octane
+        (0.15, 9.0),
+        (0.08, 7.0),    # 8%+
+        (0.10 - 1e-9, 7.0),
+        (0.06, 5.0),    # 6%+
+        (0.08 - 1e-9, 5.0),
+        (0.05, 3.0),    # at minimum (5%)
+        (0.06 - 1e-9, 3.0),
         (0.049, 0.0),   # below minimum
         (0.00,  0.0),
     ])
@@ -579,12 +577,12 @@ class TestScoreVolumeProfile:
         score, d = self.scoring.score_volume_profile(row)
         assert d["adr"] == expected
 
-    def test_max_score_is_10(self):
+    def test_max_score_is_25(self):
         row = make_row(dollar_volume=150_000_000,
                        volume_declining=True, volume_dryup_ratio=0.50,
                        adr_pct=0.12)
         score, _ = self.scoring.score_volume_profile(row)
-        assert score == 10.0
+        assert score == 25.0
 
     def test_min_score_is_0(self):
         row = make_row(dollar_volume=0, volume_declining=False, volume_dryup_ratio=1.5,
@@ -611,9 +609,9 @@ class TestScoreVolumeProfile:
 class TestScoreRiskReward:
     """
     score_risk_reward() decomposes into:
-      - Stop distance vs ADR  (0–7 pts)
-      - R-multiple potential  (0–3 pts)
-    Max total = 10.
+      - Stop distance vs ADR  (0-10 pts)
+      - R-multiple potential  (0-5 pts)
+    Max total = 15.
     """
 
     scoring = make_scoring()
@@ -622,31 +620,31 @@ class TestScoreRiskReward:
     # stop_in_adr = stop_distance / max(adr_pct, 0.01)
 
     @pytest.mark.parametrize("stop_dist, adr, expected_stop_score", [
-        # Ideal range [0.5x, 1.0x ADR] → 7 pts
-        (0.05, 0.10, 7.0),   # 0.5× ADR exactly (lower boundary)
-        (0.075, 0.10, 7.0),  # 0.75× ADR
-        (0.10, 0.10, 7.0),   # 1.0× ADR (upper boundary)
-        # Too tight < 0.5× → 2 pts
-        (0.03, 0.10, 2.0),   # 0.3×
-        (0.001, 0.10, 2.0),  # 0.01×
-        # [1.0x, 1.5x] → 6 pts
-        (0.11, 0.10, 6.0),   # 1.1×
-        (0.15, 0.10, 6.0),   # 1.5× (boundary)
-        # [1.5x, 2.0x] → 4 pts
-        (0.16, 0.10, 4.0),   # 1.6×
-        (0.20, 0.10, 4.0),   # 2.0× (boundary)
-        # [2.0x, 2.5x] → 2 pts
-        (0.21, 0.10, 2.0),   # 2.1×
-        (0.25, 0.10, 2.0),   # 2.5× (boundary)
-        # > 2.5× → 0 pts
-        (0.26, 0.10, 0.0),   # 2.6×
-        (0.50, 0.10, 0.0),   # extreme
+        # Ideal range [0.5x, 1.0x ADR] -> 10 pts
+        (0.05, 0.10, 10.0),   # 0.5x ADR exactly (lower boundary)
+        (0.075, 0.10, 10.0),  # 0.75x ADR
+        (0.10, 0.10, 10.0),   # 1.0x ADR (upper boundary)
+        # Too tight < 0.5x -> 3 pts
+        (0.03, 0.10, 3.0),    # 0.3x
+        (0.001, 0.10, 3.0),   # 0.01x
+        # [1.0x, 1.5x] -> 8 pts
+        (0.11, 0.10, 8.0),    # 1.1x
+        (0.15, 0.10, 8.0),    # 1.5x (boundary)
+        # [1.5x, 2.0x] -> 5 pts
+        (0.16, 0.10, 5.0),    # 1.6x
+        (0.20, 0.10, 5.0),    # 2.0x (boundary)
+        # [2.0x, 2.5x] -> 3 pts
+        (0.21, 0.10, 3.0),    # 2.1x
+        (0.25, 0.10, 3.0),    # 2.5x (boundary)
+        # > 2.5x -> 0 pts
+        (0.26, 0.10, 0.0),    # 2.6x
+        (0.50, 0.10, 0.0),    # extreme
     ])
     def test_stop_vs_adr(self, stop_dist, adr, expected_stop_score):
         row = make_row(stop_distance_pct=stop_dist, adr_pct=adr, potential_r=0.0)
         score, d = self.scoring.score_risk_reward(row)
         assert d["stop_vs_adr"] == expected_stop_score, (
-            f"stop={stop_dist}, adr={adr} → in_adr={stop_dist/adr:.2f} "
+            f"stop={stop_dist}, adr={adr} -> in_adr={stop_dist/adr:.2f} "
             f"expected {expected_stop_score}, got {d['stop_vs_adr']}"
         )
 
@@ -654,7 +652,7 @@ class TestScoreRiskReward:
         """adr=0 should not divide by zero — uses max(adr, 0.01)."""
         row = make_row(stop_distance_pct=0.05, adr_pct=0.0, potential_r=0.0)
         score, d = self.scoring.score_risk_reward(row)
-        # 0.05 / 0.01 = 5.0× → > 2.5 → stop_score = 0
+        # 0.05 / 0.01 = 5.0x -> > 2.5 -> stop_score = 0
         assert d["stop_vs_adr"] == 0.0
 
     # --- 5b. R-multiple ---
@@ -662,14 +660,14 @@ class TestScoreRiskReward:
     min_r = PARAMETERS["risk_reward_min"]  # 3.0
 
     @pytest.mark.parametrize("r_multiple, expected_r_score", [
-        (5.0, 3.0),          # 5R+ exceptional
-        (6.0, 3.0),
-        (4.0, 2.5),          # 4R excellent
-        (5.0 - 1e-9, 2.5),
-        (min_r, 2.0),        # min_r (3.0) minimum acceptable
-        (4.0 - 1e-9, 2.0),
-        (2.0, 1.0),          # 2R below target
-        (min_r - 1e-9, 1.0),
+        (5.0, 5.0),          # 5R+ exceptional
+        (6.0, 5.0),
+        (4.0, 4.0),          # 4R excellent
+        (5.0 - 1e-9, 4.0),
+        (min_r, 3.0),        # min_r (3.0) minimum acceptable
+        (4.0 - 1e-9, 3.0),
+        (2.0, 1.5),          # 2R below target
+        (min_r - 1e-9, 1.5),
         (1.9, 0.0),          # < 2R poor
         (0.0, 0.0),
     ])
@@ -679,10 +677,10 @@ class TestScoreRiskReward:
         score, d = self.scoring.score_risk_reward(row)
         assert d["r_multiple"] == expected_r_score
 
-    def test_max_score_is_10(self):
+    def test_max_score_is_15(self):
         row = make_row(stop_distance_pct=0.05, adr_pct=0.10, potential_r=6.0)
         score, _ = self.scoring.score_risk_reward(row)
-        assert score == 10.0
+        assert score == 15.0
 
     def test_min_score_is_0(self):
         row = make_row(stop_distance_pct=0.50, adr_pct=0.10, potential_r=0.0)
@@ -709,7 +707,7 @@ class TestApplyHardFilters:
             sma_50=9.0,               # close > sma_50
             dollar_volume=15_000_000, # > $10M
             adr_pct=0.06,             # > 5%
-            stop_distance_pct=0.06,   # 6% stop / 6% ADR = 1.0× (< 3×)
+            stop_distance_pct=0.06,   # 6% stop / 6% ADR = 1.0x (< 3x)
             pct_from_52wk_high=-0.10, # within 30%
         )
 
@@ -773,9 +771,7 @@ class TestApplyHardFilters:
         row = self._passing_row()
         row["close"] = 50.0
         row["sma_50"] = 50.0
-        # close < sma_50 → 50.0 < 50.0 is False → passes this filter
         passes, failures = self.scoring.apply_hard_filters(row)
-        # Whether it passes overall depends on other filters; just check SMA filter
         assert not any("50 SMA" in f for f in failures)
 
     # --- Filter 4: Minimum ADR ---
@@ -788,8 +784,7 @@ class TestApplyHardFilters:
     def test_filter_adr(self, adr, should_pass):
         row = self._passing_row()
         row["adr_pct"] = adr
-        # Adjust stop so it stays within 3× ADR
-        row["stop_distance_pct"] = adr * 1.0  # 1× ADR
+        row["stop_distance_pct"] = adr * 1.0  # 1x ADR
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes == should_pass
         if not should_pass:
@@ -798,18 +793,18 @@ class TestApplyHardFilters:
     # --- Filter 5: Stop distance relative to ADR ---
 
     def test_filter_stop_exactly_3x_adr_passes(self):
-        """stop = 3× ADR exactly: 0.15 > 0.15 is False → passes."""
+        """stop = 3x ADR exactly: 0.15 > 0.15 is False -> passes."""
         row = self._passing_row()
         row["adr_pct"] = 0.05
-        row["stop_distance_pct"] = 0.15  # exactly 3.0× ADR
+        row["stop_distance_pct"] = 0.15  # exactly 3.0x ADR
         passes, failures = self.scoring.apply_hard_filters(row)
         assert not any("Stop distance" in f and "ADR" in f for f in failures)
 
     def test_filter_stop_over_3x_adr_fails(self):
-        """stop = 3.01× ADR → fails."""
+        """stop = 3.01x ADR -> fails."""
         row = self._passing_row()
         row["adr_pct"] = 0.05
-        row["stop_distance_pct"] = 0.151  # > 0.15 = 3× ADR
+        row["stop_distance_pct"] = 0.151  # > 0.15 = 3x ADR
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes is False
         assert any("Stop distance" in f for f in failures)
@@ -825,7 +820,7 @@ class TestApplyHardFilters:
     # --- Filter 6: Within 30% of 52-week high ---
 
     @pytest.mark.parametrize("pct_from_high, should_pass", [
-        (-0.30, True),    # exactly at -30%: -0.30 < -0.30 is False → passes
+        (-0.30, True),    # exactly at -30%: -0.30 < -0.30 is False -> passes
         (-0.301, False),  # just over 30% below
         (-0.10, True),
         (-0.50, False),
@@ -840,11 +835,10 @@ class TestApplyHardFilters:
             assert any("52wk high" in f for f in failures)
 
     def test_filter_52wk_nan_skipped(self):
-        """NaN pct_from_52wk_high should not trigger the filter (guarded by isna check)."""
+        """NaN pct_from_52wk_high should not trigger the filter."""
         row = self._passing_row()
         row["pct_from_52wk_high"] = np.nan
         passes, failures = self.scoring.apply_hard_filters(row)
-        # NaN guard: `not pd.isna(pct_from_high) and ...` → filter skipped
         assert not any("52wk high" in f for f in failures)
 
     def test_multiple_failures_all_reported(self):
@@ -854,7 +848,7 @@ class TestApplyHardFilters:
             dollar_volume=100,    # fails dollar volume
             sma_50=999.0,         # fails above-50-SMA
             adr_pct=0.01,         # fails ADR
-            stop_distance_pct=1.0, # fails stop (> 3× ADR)
+            stop_distance_pct=1.0, # fails stop (> 3x ADR)
             pct_from_52wk_high=-0.90,  # fails 52wk high
         )
         passes, failures = self.scoring.apply_hard_filters(row)
@@ -1092,10 +1086,10 @@ class TestScoreDataframe:
                 assert signal == scoring.get_signal_strength(total)
 
     def test_rs_ranks_applied_per_date(self):
-        """RS ranks dict (date → percentile) must feed into per-row scoring."""
+        """RS ranks dict (date -> percentile) must feed into per-row scoring."""
         scoring = make_scoring()
         df = self._build_feature_df()
-        # Assign top percentile (95) to all passing rows → rs_rank = 8 pts
+        # Assign top percentile (95) to all passing rows
         rs_ranks = {date: 95.0 for date in df.index}
         scored_with_rank = scoring.score_dataframe(df, rs_ranks=rs_ranks)
         scored_no_rank = scoring.score_dataframe(df)
@@ -1135,7 +1129,7 @@ class TestGoldenSnapshot:
         assert bd.raw_total == 100.0
 
     def test_ideal_setup_in_downtrend_scores_50_total(self):
-        """Severe downtrend: multiplier = 0.5 → total halved."""
+        """Severe downtrend: multiplier = 0.5 -> total halved."""
         scoring = make_scoring(regime_multiplier=0.5)
         bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
         assert bd.total == pytest.approx(50.0)
@@ -1151,7 +1145,7 @@ class TestGoldenSnapshot:
         assert scoring.get_signal_strength(bd.total) == "STRONG BUY - Alert"
 
     def test_ideal_setup_in_downtrend_signal_is_pass(self):
-        """Multiplier=0.5 → total=50 → PASS (below 60 threshold)."""
+        """Multiplier=0.5 -> total=50 -> PASS (below 60 threshold)."""
         scoring = make_scoring(regime_multiplier=0.5)
         bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
         assert scoring.get_signal_strength(bd.total) == "PASS"
@@ -1162,11 +1156,11 @@ class TestGoldenSnapshot:
         row = make_ideal_row()
         bd = scoring.calculate_total_score(row, rs_rank=95.0)
         weights = PARAMETERS["weights"]
-        assert bd.base_quality == weights["base_quality"]         # 25
-        assert bd.trend_strength == weights["trend_strength"]     # 30
-        assert bd.relative_strength == weights["relative_strength"] # 25
-        assert bd.volume_profile == weights["volume_profile"]     # 10
-        assert bd.risk_reward == weights["risk_reward"]           # 10
+        assert bd.base_quality == weights["base_quality"]         # 15
+        assert bd.trend_strength == weights["trend_strength"]     # 15
+        assert bd.relative_strength == weights["relative_strength"] # 30
+        assert bd.volume_profile == weights["volume_profile"]     # 25
+        assert bd.risk_reward == weights["risk_reward"]           # 15
 
     def test_weight_totals_sum_to_100(self):
         """Documented weights must sum to 100 — the denominator of the scale."""

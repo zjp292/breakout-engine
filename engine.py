@@ -12,10 +12,10 @@ class Engine:
         self.features = Features(config)
         self.scoring = Scoring(config)
         self.benchmark_df = None
-        self.spy_df = None          # S&P 500 — multi-index confirmation
-        self.iwm_df = None          # Russell 2000 — small-cap breadth
+        self.spy_df = None  # S&P 500 — multi-index confirmation
+        self.iwm_df = None  # Russell 2000 — small-cap breadth
         self.market_condition = None  # MarketConditionResult from last run
-        self.macro_regime = None      # MacroRegimeResult — sustained environment
+        self.macro_regime = None  # MacroRegimeResult — sustained environment
 
     def load_pickle(self, file):
         with open(file, "rb") as f:
@@ -35,9 +35,9 @@ class Engine:
         if date_str is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-        end_dt   = datetime.now()
-        start_dt = end_dt - timedelta(days=400)   # extra buffer for 200-day SMA
-        end_ts   = int(end_dt.timestamp() * 1000)
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=400)  # extra buffer for 200-day SMA
+        end_ts = int(end_dt.timestamp() * 1000)
         start_ts = int(start_dt.timestamp() * 1000)
 
         client = SchwabAPIClient()
@@ -69,65 +69,62 @@ class Engine:
 
         Two complementary layers:
 
-        1. MarketConditionAnalyzer (100-pt score → 0.50–1.00 multiplier)
+        1. MarketConditionAnalyzer (100-pt score = 0.50-1.00 multiplier)
            Short-term health: distribution days, follow-through days, SMA alignment,
            internal breadth of watchlist stocks, 21-day momentum.
-           Window: roughly the last 4–6 weeks of activity.
+           Window: roughly the last 4-6 weeks of activity.
 
-        2. MacroRegimeAnalyzer (direction × quality → 0.60–1.00 multiplier)
+        2. MacroRegimeAnalyzer (direction x quality = 0.60-1.00 multiplier)
            Sustained macro environment: Choppiness Index, ADX, R², Hurst Exponent,
            multi-timeframe momentum confluence, volatility regime, price structure.
-           Window: 3–12 months — captures "choppy since October"-style regimes.
+           Window: 3-12 months - captures "choppy since October"-style regimes.
 
         Combined multiplier (weighted blend):
-          final = 0.55 × daily_multiplier + 0.45 × macro_multiplier
+          final = 0.55 x daily_multiplier + 0.45 x macro_multiplier
 
         The daily analysis stays reactive to current conditions; the macro prevents
         over-sizing during sustained unfavorable periods even when a single day looks OK.
 
         Sets self.market_condition and self.macro_regime for downstream use.
-        Returns the final blended multiplier (0.50–1.00).
+        Returns the final blended multiplier (0.50-1.00).
         """
         from market_condition import MarketConditionAnalyzer
         from macro_regime import MacroRegimeAnalyzer
 
         if not self.config.get("market_regime", True):
             self.market_condition = None
-            self.macro_regime     = None
+            self.macro_regime = None
             return 1.0
 
         if self.benchmark_df is None:
             self.market_condition = None
-            self.macro_regime     = None
+            self.macro_regime = None
             return 1.0
 
-        # ── Layer 1: daily market condition ───────────────────────────────
         mc_analyzer = MarketConditionAnalyzer(self.config)
-        mc_result   = mc_analyzer.analyze(
-            compx_df          = self.benchmark_df,
-            spy_df            = self.spy_df,
-            iwm_df            = self.iwm_df,
-            stock_feature_dfs = feature_dfs,
+        mc_result = mc_analyzer.analyze(
+            compx_df=self.benchmark_df,
+            spy_df=self.spy_df,
+            iwm_df=self.iwm_df,
+            stock_feature_dfs=feature_dfs,
         )
         self.market_condition = mc_result
         self._print_market_condition(mc_result)
 
-        # ── Layer 2: macro regime ─────────────────────────────────────────
         macro_analyzer = MacroRegimeAnalyzer(self.config)
-        macro_result   = macro_analyzer.analyze(
-            compx_df = self.benchmark_df,
-            spy_df   = self.spy_df,
-            iwm_df   = self.iwm_df,
+        macro_result = macro_analyzer.analyze(
+            compx_df=self.benchmark_df,
+            spy_df=self.spy_df,
+            iwm_df=self.iwm_df,
         )
         self.macro_regime = macro_result
         self._print_macro_regime(macro_result)
 
-        # ── Blended multiplier ────────────────────────────────────────────
         daily_mult = mc_result.regime_multiplier
         macro_mult = macro_result.macro_multiplier
-        blended    = round(0.55 * daily_mult + 0.45 * macro_mult, 3)
+        blended = round(0.55 * daily_mult + 0.45 * macro_mult, 3)
 
-        # Floor at 0.50 to match existing system behaviour
+        # floor at 0.50 to match existing system behaviour
         return max(0.50, blended)
 
     def _print_market_condition(self, mc) -> None:
@@ -137,10 +134,10 @@ class Engine:
 
         # Regime colour codes (no external dep; plain ASCII for terminal)
         regime_badges = {
-            "BULL":      "▲ BULL",
-            "UPTREND":   "↑ UPTREND",
-            "MIXED":     "↔ MIXED",
-            "CAUTION":   "↓ CAUTION",
+            "BULL": "▲ BULL",
+            "UPTREND": "↑ UPTREND",
+            "MIXED": "↔ MIXED",
+            "CAUTION": "↓ CAUTION",
             "DOWNTREND": "▼ DOWNTREND",
         }
         badge = regime_badges.get(mc.regime, mc.regime)
@@ -157,8 +154,24 @@ class Engine:
         # Index Trend
         conds = mc.details.get("index", {}).get("sma_conditions", {})
         aligned = sum(1 for v in conds.values() if v)
-        spy_str = "SPY ✓" if mc.spy_above_200 else ("SPY ✗" if mc.details.get("index", {}).get("spy_above_200") is False else "SPY –")
-        iwm_str = "IWM ✓" if mc.iwm_above_200 else ("IWM ✗" if mc.details.get("index", {}).get("iwm_above_200") is False else "IWM –")
+        spy_str = (
+            "SPY ✓"
+            if mc.spy_above_200
+            else (
+                "SPY ✗"
+                if mc.details.get("index", {}).get("spy_above_200") is False
+                else "SPY –"
+            )
+        )
+        iwm_str = (
+            "IWM ✓"
+            if mc.iwm_above_200
+            else (
+                "IWM ✗"
+                if mc.details.get("index", {}).get("iwm_above_200") is False
+                else "IWM –"
+            )
+        )
         print(
             f"  Index Trend       {mc.index_trend_score:5.1f}/25"
             f"   [{aligned}/6 SMA conditions  {spy_str}  {iwm_str}]"
@@ -175,31 +188,30 @@ class Engine:
         # Follow-Through Day
         if mc.ftd_found:
             validity = "valid" if mc.ftd_valid else "INVALIDATED"
-            ago      = f"{mc.ftd_days_ago}d ago" if mc.ftd_days_ago is not None else "?"
-            ftd_str  = f"FTD {mc.ftd_date[:10] if mc.ftd_date else '?'} ({ago}, {validity})"
+            ago = f"{mc.ftd_days_ago}d ago" if mc.ftd_days_ago is not None else "?"
+            ftd_str = (
+                f"FTD {mc.ftd_date[:10] if mc.ftd_date else '?'} ({ago}, {validity})"
+            )
         else:
             pct_hi = mc.details.get("follow_through", {}).get("pct_from_high")
             if pct_hi is not None:
-                ftd_str = f"no FTD — {abs(pct_hi)*100:.1f}% from 52wk high"
+                ftd_str = f"no FTD — {abs(pct_hi) * 100:.1f}% from 52wk high"
             else:
                 ftd_str = "no FTD detected in lookback window"
-        print(
-            f"  Follow-Through    {mc.follow_through_score:5.1f}/20"
-            f"   [{ftd_str}]"
-        )
+        print(f"  Follow-Through    {mc.follow_through_score:5.1f}/20   [{ftd_str}]")
 
         # Internal Breadth
         n = mc.details.get("breadth", {}).get("n_stocks", 0)
         print(
             f"  Internal Breadth  {mc.breadth_score:5.1f}/20"
-            f"   [{mc.pct_above_50sma*100:.0f}% >50d  "
-            f"{mc.pct_in_stage2*100:.0f}% Stage2  "
-            f"{mc.pct_near_52wk_high*100:.0f}% near high  "
+            f"   [{mc.pct_above_50sma * 100:.0f}% >50d  "
+            f"{mc.pct_in_stage2 * 100:.0f}% Stage2  "
+            f"{mc.pct_near_52wk_high * 100:.0f}% near high  "
             f"n={n}]"
         )
 
         # Momentum & Volatility
-        rv_pct  = mc.realized_vol_annualized * 100
+        rv_pct = mc.realized_vol_annualized * 100
         roc_pct = mc.compx_roc_21d * 100
         print(
             f"  Momentum/Vol      {mc.momentum_score:5.1f}/15"
@@ -210,7 +222,7 @@ class Engine:
 
     def _print_macro_regime(self, mr) -> None:
         """Print a formatted macro regime report to stdout."""
-        W   = 66
+        W = 66
         bar = "═" * W
 
         direction_badges = {
@@ -219,20 +231,20 @@ class Engine:
             "BEARISH": "▼ BEARISH",
         }
         quality_badges = {
-            "TRENDING":      "TRENDING",
+            "TRENDING": "TRENDING",
             "TRANSITIONING": "TRANSITIONING",
-            "CHOPPY":        "CHOPPY ⚠",
+            "CHOPPY": "CHOPPY ⚠",
         }
         vol_badges = {
-            "CALM":     "CALM",
-            "NORMAL":   "NORMAL",
+            "CALM": "CALM",
+            "NORMAL": "NORMAL",
             "ELEVATED": "ELEVATED ⚠",
-            "EXTREME":  "EXTREME ⛔",
+            "EXTREME": "EXTREME ⛔",
         }
 
         dir_str = direction_badges.get(mr.trend_direction, mr.trend_direction)
-        qlt_str = quality_badges.get(mr.trend_quality,    mr.trend_quality)
-        vol_str = vol_badges.get(mr.vol_regime,            mr.vol_regime)
+        qlt_str = quality_badges.get(mr.trend_quality, mr.trend_quality)
+        vol_str = vol_badges.get(mr.vol_regime, mr.vol_regime)
 
         print(f"{bar}")
         print("  MACRO REGIME ANALYSIS  (3-12 month sustained environment)")
@@ -252,16 +264,16 @@ class Engine:
         )
         print(
             f"    Mom confluence  {mr.mom_confluence:+.2f}"
-            f"   [21d {mr.mom_21d*100:+.1f}%"
-            f"  63d {mr.mom_63d*100:+.1f}%"
-            f"  126d {mr.mom_126d*100:+.1f}%"
-            f"  252d {mr.mom_252d*100:+.1f}%]"
+            f"   [21d {mr.mom_21d * 100:+.1f}%"
+            f"  63d {mr.mom_63d * 100:+.1f}%"
+            f"  126d {mr.mom_126d * 100:+.1f}%"
+            f"  252d {mr.mom_252d * 100:+.1f}%]"
         )
         di_dir = "▲" if mr.plus_di > mr.minus_di else "▼"
         print(
             f"    ADX direction   {di_dir}  +DI {mr.plus_di:.1f}"
             f"  −DI {mr.minus_di:.1f}"
-            f"   Reg slope (63d) {mr.reg_slope_63d*100:+.1f}%/yr"
+            f"   Reg slope (63d) {mr.reg_slope_63d * 100:+.1f}%/yr"
         )
 
         # ── Quality signals ───────────────────────────────────────────────
@@ -270,24 +282,34 @@ class Engine:
             f"  Quality score     {mr.quality_score:.3f}  {qlt_bar}"
             f"  [{mr.trend_quality}]"
         )
-        ci_flag = "  ⚠ choppy" if mr.choppiness_14 > 61.8 else (
-                  "  ✓ trending" if mr.choppiness_14 < 38.2 else ""
+        ci_flag = (
+            "  ⚠ choppy"
+            if mr.choppiness_14 > 61.8
+            else ("  ✓ trending" if mr.choppiness_14 < 38.2 else "")
         )
         print(
             f"    Choppiness(14)  {mr.choppiness_14:.1f}{ci_flag}"
             f"   Choppiness(50) {mr.choppiness_50:.1f}"
         )
-        adx_note = "no trend" if mr.adx_14 < 20 else (
-                   "weak trend" if mr.adx_14 < 25 else (
-                   "trending"   if mr.adx_14 < 40 else "strong trend"))
+        adx_note = (
+            "no trend"
+            if mr.adx_14 < 20
+            else (
+                "weak trend"
+                if mr.adx_14 < 25
+                else ("trending" if mr.adx_14 < 40 else "strong trend")
+            )
+        )
         print(
             f"    ADX(14)         {mr.adx_14:.1f}  [{adx_note}]"
             f"   R²(63d) {mr.reg_r2_63d:.2f}"
         )
         hurst_note = (
-            "trending/persistent" if mr.hurst > 0.55 else
-            "mean-reverting"      if mr.hurst < 0.45 else
-            "random walk"
+            "trending/persistent"
+            if mr.hurst > 0.55
+            else "mean-reverting"
+            if mr.hurst < 0.45
+            else "random walk"
         )
         print(f"    Hurst exp       {mr.hurst:.3f}  [{hurst_note}]")
 
@@ -295,25 +317,29 @@ class Engine:
         vr_flag = "  ⚠ expanding" if mr.vol_rising else ""
         print(
             f"  Volatility        {vol_str}"
-            f"   10d {mr.vol_10d*100:.1f}%"
-            f"  60d {mr.vol_60d*100:.1f}%"
+            f"   10d {mr.vol_10d * 100:.1f}%"
+            f"  60d {mr.vol_60d * 100:.1f}%"
             f"  ratio ×{mr.vol_ratio:.2f}{vr_flag}"
         )
 
         # ── Price structure ───────────────────────────────────────────────
         spy_str = (
-            "SPY ✓" if mr.spy_above_200 is True else
-            "SPY ✗" if mr.spy_above_200 is False else
-            "SPY –"
+            "SPY ✓"
+            if mr.spy_above_200 is True
+            else "SPY ✗"
+            if mr.spy_above_200 is False
+            else "SPY –"
         )
         iwm_str = (
-            "IWM ✓" if mr.iwm_above_200 is True else
-            "IWM ✗" if mr.iwm_above_200 is False else
-            "IWM –"
+            "IWM ✓"
+            if mr.iwm_above_200 is True
+            else "IWM ✗"
+            if mr.iwm_above_200 is False
+            else "IWM –"
         )
         print(
-            f"  3-month range     {mr.range_width_pct*100:.1f}%"
-            f"   {abs(mr.pct_from_swing_high)*100:.1f}% below swing high"
+            f"  3-month range     {mr.range_width_pct * 100:.1f}%"
+            f"   {abs(mr.pct_from_swing_high) * 100:.1f}% below swing high"
             f"   {spy_str}  {iwm_str}"
         )
 
@@ -325,8 +351,8 @@ class Engine:
         Render a simple ASCII progress bar showing where `value` falls in [lo, hi].
         E.g. value=0.3, lo=-1, hi=1, width=20 → '[──────────●─────────]'
         """
-        frac     = max(0.0, min(1.0, (value - lo) / (hi - lo)))
-        pos      = int(round(frac * (width - 1)))
+        frac = max(0.0, min(1.0, (value - lo) / (hi - lo)))
+        pos = int(round(frac * (width - 1)))
         bar_body = "─" * pos + "●" + "─" * (width - 1 - pos)
         return f"[{bar_body}]"
 
@@ -381,7 +407,9 @@ class Engine:
                 df = self.load_pickle(str(pickle_file))
 
                 # Convert Schwab ms datetime to a normalized DatetimeIndex
-                if "datetime" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+                if "datetime" in df.columns and not isinstance(
+                    df.index, pd.DatetimeIndex
+                ):
                     df["datetime"] = pd.to_datetime(df["datetime"], unit="ms")
                     df = df.set_index("datetime")
                     df.index = df.index.normalize()
@@ -407,7 +435,6 @@ class Engine:
         print("\nCalculating RS ranks vs peers...")
         rs_ranks = self.features.calculate_rs_rank(scored_dfs, self.benchmark_df)
 
-        # ── Market Condition Analysis ──────────────────────────────────────────
         # Runs AFTER features are computed so internal breadth (% above 50 SMA,
         # % in Stage 2, % near highs) can be drawn from the full feature DFs.
         # The resulting regime_multiplier gates all stock scores downward in weak
@@ -418,6 +445,7 @@ class Engine:
             print(f"Warning: Market condition analysis failed: {e}")
             if debug:
                 import traceback
+
                 traceback.print_exc()
             regime_mult = 1.0
 
@@ -837,7 +865,9 @@ class Features:
         df[f"range_{w_long}"] = range_long
 
         # True VCP: each successive window is progressively tighter
-        df["vcp_contracting"] = (range_short < range_medium) & (range_medium < range_long)
+        df["vcp_contracting"] = (range_short < range_medium) & (
+            range_medium < range_long
+        )
 
         # How tight is the current range vs the broadest recent window?
         # 0.20 means current short range is only 20% of the long range = strong contraction
@@ -964,9 +994,10 @@ class Features:
         df = self.detect_vcp_contractions(df)
 
         # Volume patterns
-        df = self.detect_volume_drying(df, lookback=self.config.get("volume_dryup_window", 10))
+        df = self.detect_volume_drying(
+            df, lookback=self.config.get("volume_dryup_window", 10)
+        )
 
-        # Risk/Reward (NEW)
         df = self.calculate_stop(df)
         df = self.calculate_rr(df)
 
@@ -983,22 +1014,17 @@ class Scoring:
     """
     Scores stocks based on Qullamaggie breakout + Minervini VCP principles.
 
-    Scoring Philosophy:
-    - Base Quality (25pts):      Tight VCP base — range compression + length + contraction series
-    - Trend Strength (30pts):    Stage 2 MA stack + 52wk proximity + MA alignment + prior move
-    - Relative Strength (25pts): Excess return vs benchmark (corrected formula, bear-safe)
-    - Volume Profile (10pts):    Liquidity + volume dry-up (single, non-duplicated)
-    - Risk/Reward (10pts):       Stop distance relative to ADR + R-multiple
+    Weights rebalanced 2026-03 based on 793 outcome correlations:
+    - Base Quality (15pts):      VCP base structure — demoted, low empirical signal
+    - Trend Strength (15pts):    Stage 2 + proximity + MA — sanity check, not differentiator
+    - Relative Strength (30pts): RS leadership — strongest confirmed predictor
+    - Volume Profile (25pts):    Liquidity + dry-up + ADR — empirically dominant
+    - Risk/Reward (15pts):       Stop vs ADR + R-multiple — foundational to the strategy
 
-    Market Regime: A multiplier (0.70–1.0) is applied based on benchmark trend.
-    In downtrends, the same setup scores lower — matching how both traders go to cash.
+    Market Regime: A multiplier (0.50–1.0) applied based on benchmark trend.
 
-    Grade Scale (after regime adjustment):
-    90-100: A+ (Exceptional setup — immediate alert)
-    80-89:  A  (Strong setup — high priority)
-    70-79:  B  (Good setup — watch closely)
-    60-69:  C  (Marginal — monitor)
-    <60:    D/F (Pass)
+    Grade Scale (based on raw_score, pre-regime):
+    90-100: A+ | 80-89: A | 70-79: B | 60-69: C | <60: D
     """
 
     def __init__(self, config):
@@ -1006,11 +1032,11 @@ class Scoring:
         self.weights = config.get(
             "weights",
             {
-                "base_quality": 25,
-                "trend_strength": 30,
-                "relative_strength": 25,
-                "volume_profile": 10,
-                "risk_reward": 10,
+                "base_quality": 15,
+                "trend_strength": 15,
+                "relative_strength": 30,
+                "volume_profile": 25,
+                "risk_reward": 15,
             },
         )
         self.min_score_alert = config.get("min_score_alert", 80)
@@ -1025,76 +1051,70 @@ class Scoring:
         """
         Score consolidation quality based on Qullamaggie + Minervini VCP criteria.
 
-        Components:
-        - Consolidation tightness (0-10pts): Range compression of the current base
-        - Base length (0-8pts): Accommodates tight flags (5-15d) and VCP bases (15-45d)
-        - VCP contraction structure (0-7pts): Is this base part of a narrowing series?
+        Components (rebalanced 2026-03 — demoted from 25 to 15 pts):
+        - Consolidation tightness (0-6pts): Range compression of the current base
+        - Base length (0-5pts): Accommodates tight flags (5-15d) and VCP bases (15-45d)
+        - VCP contraction structure (0-4pts): Is this base part of a narrowing series?
 
-        Note: Volume dry-up lives exclusively in score_volume_profile to avoid
-        double-counting. This category is purely about price structure.
+        Volume dry-up lives exclusively in score_volume_profile.
 
-        Perfect Score: <3% current range, 5-15 day base, clear VCP contraction series
+        Perfect Score: <2% current range, 5-15 day base, strong VCP contraction
         """
         score = 0.0
         details = {}
 
-        # 1. CONSOLIDATION TIGHTNESS (0-10 points)
-        # The tighter the base, the more energy coiled for the breakout
+        # 1. CONSOLIDATION TIGHTNESS (0-6 points)
         consol_range_key = f"consol_range_{self.config.get('base_length_max', 60)}"
         consol_range = row.get(consol_range_key, 1.0)
 
-        if consol_range <= 0.02:    # <2% — exceptional (VCP handle)
-            tightness_score = 10.0
-        elif consol_range <= 0.03:  # 2-3% — excellent
-            tightness_score = 9.0
-        elif consol_range <= 0.05:  # 3-5% — good
-            tightness_score = 7.0
-        elif consol_range <= 0.08:  # 5-8% — acceptable
+        if consol_range <= 0.02:
+            tightness_score = 6.0
+        elif consol_range <= 0.03:
+            tightness_score = 5.0
+        elif consol_range <= 0.05:
             tightness_score = 4.0
-        else:                        # >8% — too loose
+        elif consol_range <= 0.08:
+            tightness_score = 2.0
+        else:
             tightness_score = 0.0
 
         score += tightness_score
         details["tightness"] = tightness_score
 
-        # 2. BASE LENGTH (0-8 points)
-        # Qullamaggie: tight flags 5-15 days. Minervini VCPs: up to 8 weeks.
-        # Extended ranges accommodated — penalize only very short or very long.
+        # 2. BASE LENGTH (0-5 points)
         consol_days = row.get("consol_days", 0)
 
-        if 5 <= consol_days <= 15:     # Sweet spot: tight flag or short VCP
-            length_score = 8.0
-        elif 15 < consol_days <= 30:   # Classic VCP base
-            length_score = 7.0
-        elif 30 < consol_days <= 45:   # Longer VCP — still valid
-            length_score = 6.0
-        elif 3 <= consol_days < 5:     # Micro-flag — too short but acceptable
+        if 5 <= consol_days <= 15:
             length_score = 5.0
-        elif 45 < consol_days <= 60:   # Extended — momentum may be fading
+        elif 15 < consol_days <= 30:
+            length_score = 4.0
+        elif 30 < consol_days <= 45:
             length_score = 3.0
-        elif consol_days > 60:         # Too long — institutional interest likely lost
-            length_score = 1.0
-        else:                           # < 3 days — not a real base
+        elif 3 <= consol_days < 5:
+            length_score = 2.5
+        elif 45 < consol_days <= 60:
+            length_score = 1.5
+        elif consol_days > 60:
+            length_score = 0.5
+        else:
             length_score = 0.0
 
         score += length_score
         details["base_length"] = length_score
 
-        # 3. VCP CONTRACTION STRUCTURE (0-7 points)
-        # Is the stock in a progressively narrowing series of contractions?
-        # range_10 < range_20 < range_40 = the "VC" shape of VCP
+        # 3. VCP CONTRACTION STRUCTURE (0-4 points)
         vcp_contracting = row.get("vcp_contracting", False)
         vcp_ratio = row.get("vcp_contraction_ratio", 1.0)
 
-        if vcp_contracting and vcp_ratio <= 0.25:   # Current range ≤25% of 40d range
-            vcp_score = 7.0                          # Very strong contraction series
-        elif vcp_contracting and vcp_ratio <= 0.40: # Clear multi-stage contraction
-            vcp_score = 5.0
-        elif vcp_contracting:                        # Contracting but modest
+        if vcp_contracting and vcp_ratio <= 0.25:
+            vcp_score = 4.0
+        elif vcp_contracting and vcp_ratio <= 0.40:
             vcp_score = 3.0
-        elif vcp_ratio <= 0.60:                      # Partially contracted, not ordered
-            vcp_score = 1.0
-        else:                                         # Flat or expanding range
+        elif vcp_contracting:
+            vcp_score = 2.0
+        elif vcp_ratio <= 0.60:
+            vcp_score = 0.5
+        else:
             vcp_score = 0.0
 
         score += vcp_score
@@ -1110,106 +1130,96 @@ class Scoring:
         """
         Score underlying trend structure — Qullamaggie + Minervini combined.
 
-        Components:
-        - Stage 2 structure (0-10pts): Long-term MA alignment (50>150>200, price>150)
-        - 52-week high proximity (0-8pts): Near all-time/52wk highs
-        - Short-term MA structure (0-7pts): 10>20>50 aligned + rising + price above 10 SMA
-        - Prior power move (0-5pts): Strong trend leg before the current base
-
-        The old SMA distance scoring used abs() — treating "2% below" and "2% above"
-        identically. Being below the 10 SMA during a base is a red flag, not neutral.
-        This version is directional.
+        Components (rebalanced 2026-03 — demoted from 30 to 15 pts):
+        - Stage 2 structure (0-5pts): Long-term MA alignment
+        - 52-week high proximity (0-4pts): Near highs = less overhead supply
+        - Short-term MA structure (0-3pts): 10>20>50 aligned + rising
+        - Prior power move (0-3pts): Flag pole before the base
 
         Perfect Score: Stage 2, within 5% of 52wk high, perfect MA structure, 40%+ prior move
         """
         score = 0.0
         details = {}
 
-        # 1. STAGE 2 LONG-TERM STRUCTURE (0-10 points)
-        # Minervini's primary template: 50>150>200, price>150 SMA, 200 trending up
-        # Institutional money only flows into confirmed Stage 2 uptrends
+        # 1. STAGE 2 LONG-TERM STRUCTURE (0-5 points)
         stage2 = row.get("stage2", False)
         dist_150 = row.get("distance_from_sma150", np.nan)
         dist_200 = row.get("distance_from_sma200", np.nan)
 
         if stage2:
-            stage_score = 10.0  # Full: 50>150>200, price>150, 200d trending up
-        elif not pd.isna(dist_150) and dist_150 > 0 and not pd.isna(dist_200) and dist_200 > 0:
-            stage_score = 6.0   # Price above both 150/200 but MA stack imperfect
+            stage_score = 5.0
+        elif (
+            not pd.isna(dist_150)
+            and dist_150 > 0
+            and not pd.isna(dist_200)
+            and dist_200 > 0
+        ):
+            stage_score = 3.0
         elif not pd.isna(dist_200) and dist_200 > 0:
-            stage_score = 3.0   # At least above 200 SMA
+            stage_score = 1.5
         elif pd.isna(dist_150):
-            # Not enough history for 150/200 SMA — partial credit if short-term looks good
             ma_alignment = row.get("ma_alignment", False)
-            stage_score = 4.0 if ma_alignment else 0.0
+            stage_score = 2.0 if ma_alignment else 0.0
         else:
-            stage_score = 0.0   # Below long-term MAs — wrong side of the trend
+            stage_score = 0.0
 
         score += stage_score
         details["stage2"] = stage_score
 
-        # 2. 52-WEEK HIGH PROXIMITY (0-8 points)
-        # Qullamaggie: "I only buy stocks near their highs."
-        # Minervini template: within 25% of 52wk high
-        # Stocks making new highs have the least overhead supply
-        pct_from_high = row.get("pct_from_52wk_high", -1.0)  # 0 = at high, -0.20 = 20% below
+        # 2. 52-WEEK HIGH PROXIMITY (0-4 points)
+        pct_from_high = row.get("pct_from_52wk_high", -1.0)
 
-        if pct_from_high >= -0.05:    # Within 5% — at or near breakout point
-            proximity_score = 8.0
-        elif pct_from_high >= -0.10:  # 5-10% below — tight base near highs
-            proximity_score = 7.0
-        elif pct_from_high >= -0.15:  # 10-15% below
-            proximity_score = 5.0
-        elif pct_from_high >= -0.20:  # 15-20% below
-            proximity_score = 3.0
-        elif pct_from_high >= -0.25:  # 20-25% below (Minervini's soft limit)
-            proximity_score = 1.0
-        else:                          # >25% below — overhead supply is a headwind
+        if pct_from_high >= -0.05:
+            proximity_score = 4.0
+        elif pct_from_high >= -0.10:
+            proximity_score = 3.5
+        elif pct_from_high >= -0.15:
+            proximity_score = 2.5
+        elif pct_from_high >= -0.20:
+            proximity_score = 1.5
+        elif pct_from_high >= -0.25:
+            proximity_score = 0.5
+        else:
             proximity_score = 0.0
 
         score += proximity_score
         details["proximity_to_high"] = proximity_score
 
-        # 3. SHORT-TERM MA STRUCTURE (0-7 points)
-        # 10>20>50 aligned AND all rising AND price holding above 10 SMA
-        # The old code used abs(distance) — now directional: below 10 SMA ≠ above 10 SMA
-        ma_alignment = row.get("ma_alignment", False)   # sma_10 > sma_20 > sma_50
+        # 3. SHORT-TERM MA STRUCTURE (0-3 points)
+        ma_alignment = row.get("ma_alignment", False)
         mas_rising = row.get("mas_rising", False)
-        dist_10 = row.get("distance_from_sma10", -1.0)  # positive = above, negative = below
-
-        above_10sma = dist_10 >= -0.02  # holding above or within 2% (testing support)
+        dist_10 = row.get("distance_from_sma10", -1.0)
+        above_10sma = dist_10 >= -0.02
 
         if ma_alignment and mas_rising and above_10sma:
-            ma_score = 7.0   # Perfect: aligned, rising, price holding above
+            ma_score = 3.0
         elif ma_alignment and mas_rising:
-            ma_score = 5.0   # Aligned and rising but price below 10 SMA
+            ma_score = 2.0
         elif ma_alignment and above_10sma:
-            ma_score = 4.0   # Aligned but not all slopes positive yet
+            ma_score = 1.5
         elif ma_alignment:
-            ma_score = 2.0   # Aligned but weak
+            ma_score = 1.0
         elif row.get("sma_10", 0) > row.get("sma_20", 0):
-            ma_score = 1.0   # Only partial alignment (10>20)
+            ma_score = 0.5
         else:
-            ma_score = 0.0   # Poor structure
+            ma_score = 0.0
 
         score += ma_score
         details["ma_structure"] = ma_score
 
-        # 4. PRIOR POWER MOVE (0-5 points)
-        # The "flag pole" — a strong discrete move before the consolidation
-        # Without a prior move, there is no bull flag; it's just chop
+        # 4. PRIOR POWER MOVE (0-3 points)
         prior_move = row.get("prior_move_pct", 0.0)
         days_since_move = row.get("days_since_power_move", 999)
 
-        if prior_move >= 0.40 and days_since_move <= 30:    # 40%+ recent — big move
-            power_score = 5.0
-        elif prior_move >= 0.30 and days_since_move <= 45:  # 30%+ strong
-            power_score = 4.0
-        elif prior_move >= 0.20 and days_since_move <= 60:  # 20%+ solid
+        if prior_move >= 0.40 and days_since_move <= 30:
             power_score = 3.0
-        elif prior_move >= 0.15:                             # 15%+ modest
-            power_score = 1.5
-        else:                                                 # No clear prior move
+        elif prior_move >= 0.30 and days_since_move <= 45:
+            power_score = 2.5
+        elif prior_move >= 0.20 and days_since_move <= 60:
+            power_score = 2.0
+        elif prior_move >= 0.15:
+            power_score = 1.0
+        else:
             power_score = 0.0
 
         score += power_score
@@ -1225,75 +1235,66 @@ class Scoring:
         """
         Score outperformance vs NASDAQ Composite.
 
-        RS values are now excess returns (stock% - benchmark%), not ratios.
-        This correctly handles all market conditions — a stock that rises while
-        the market falls shows positive RS, as it should.
+        RS = excess return (stock% - benchmark%). Positive = outperforming.
+        Empirically the strongest confirmed predictor of breakout success.
 
-        Thresholds are calibrated for excess return values:
-        +0.10 = stock outperformed benchmark by 10 percentage points
-
-        Components:
-        - 20-day RS (0-7pts): Short-term leadership signal
-        - 60-day RS (0-10pts): Medium-term leadership — most predictive
-        - RS percentile rank (0-8pts): Rank vs all stocks in this watchlist
+        Components (promoted 2026-03 — raised from 25 to 30 pts):
+        - 20-day RS (0-8pts): Short-term leadership signal
+        - 60-day RS (0-12pts): Medium-term leadership — most predictive window
+        - RS percentile rank (0-10pts): Rank vs all stocks in this watchlist
 
         Perfect Score: +10% 20d excess, +20% 60d excess, top 10% of peers
         """
         score = 0.0
         details = {}
 
-        # 1. SHORT-TERM RS — 20 days (0-7 points)
-        # Excess return: stock 20d return minus benchmark 20d return
+        # 1. SHORT-TERM RS — 20 days (0-8 points)
         rs_20 = row.get("rs_comp_20", 0.0)
 
-        if rs_20 >= 0.10:    # +10%+ excess — exceptional short-term leader
-            rs_20_score = 7.0
-        elif rs_20 >= 0.05:  # +5-10% excess — strong
-            rs_20_score = 5.0
-        elif rs_20 >= 0.02:  # +2-5% excess — moderate outperformance
-            rs_20_score = 3.0
-        elif rs_20 >= 0.00:  # Neutral/slight
-            rs_20_score = 1.0
-        else:                 # Underperforming
+        if rs_20 >= 0.10:
+            rs_20_score = 8.0
+        elif rs_20 >= 0.05:
+            rs_20_score = 6.0
+        elif rs_20 >= 0.02:
+            rs_20_score = 4.0
+        elif rs_20 >= 0.00:
+            rs_20_score = 1.5
+        else:
             rs_20_score = 0.0
 
         score += rs_20_score
         details["rs_20_day"] = rs_20_score
 
-        # 2. MEDIUM-TERM RS — 60 days (0-10 points)
-        # Most predictive timeframe for breakout success
-        # Minervini's RS line emphasis: this should be rising and near new highs
+        # 2. MEDIUM-TERM RS — 60 days (0-12 points)
         rs_60 = row.get("rs_comp_60", 0.0)
 
-        if rs_60 >= 0.20:    # +20%+ excess — true market leader
+        if rs_60 >= 0.20:
+            rs_60_score = 12.0
+        elif rs_60 >= 0.15:
             rs_60_score = 10.0
-        elif rs_60 >= 0.15:  # +15-20%
+        elif rs_60 >= 0.10:
             rs_60_score = 8.0
-        elif rs_60 >= 0.10:  # +10-15%
-            rs_60_score = 6.0
-        elif rs_60 >= 0.05:  # +5-10%
-            rs_60_score = 4.0
-        elif rs_60 >= 0.00:  # Neutral
-            rs_60_score = 1.0
-        else:                 # Underperforming — wrong stock
+        elif rs_60 >= 0.05:
+            rs_60_score = 5.0
+        elif rs_60 >= 0.00:
+            rs_60_score = 1.5
+        else:
             rs_60_score = 0.0
 
         score += rs_60_score
         details["rs_60_day"] = rs_60_score
 
-        # 3. RS PERCENTILE RANK vs PEERS (0-8 points)
-        # Rank within the current watchlist — buy the leaders, not the laggards
-        # Analogous to IBD's RS Rating (Minervini specifically targets RS 80+)
+        # 3. RS PERCENTILE RANK vs PEERS (0-10 points)
         if rs_rank is not None:
-            if rs_rank >= 90:    # Top 10% — elite leader
+            if rs_rank >= 90:
+                rank_score = 10.0
+            elif rs_rank >= 80:
                 rank_score = 8.0
-            elif rs_rank >= 80:  # Top 20%
+            elif rs_rank >= 70:
                 rank_score = 6.0
-            elif rs_rank >= 70:  # Top 30%
-                rank_score = 4.0
-            elif rs_rank >= 60:  # Top 40%
-                rank_score = 2.0
-            else:                 # Below 60th percentile — not a leader
+            elif rs_rank >= 60:
+                rank_score = 3.0
+            else:
                 rank_score = 0.0
 
             score += rank_score
@@ -1311,72 +1312,69 @@ class Scoring:
         """
         Score liquidity and volume characteristics.
 
-        Volume dry-up lives exclusively here — it was previously double-counted
-        (also in score_base_quality for 7 pts). Removing the duplicate means
-        the signal is faithfully weighted once.
+        Empirically the most predictive category — volume dry-up, ADR, and
+        dollar volume all correlate strongly with 20-day max gain.
 
-        Components:
-        - Dollar volume (0-3pts): Institutional-grade liquidity
-        - Volume dry-up (0-4pts): Contraction into the base (single source of truth)
-        - ADR % (0-3pts): Volatility above the minimum — differentiates quality
+        Components (promoted 2026-03 — raised from 10 to 25 pts):
+        - Dollar volume (0-6pts): Institutional-grade liquidity
+        - Volume dry-up (0-10pts): Contraction into the base (single source of truth)
+        - ADR % (0-9pts): Bigger movers produce bigger breakouts
 
-        Perfect Score: >$100M dollar volume, strong dry-up, 8%+ ADR
+        Perfect Score: >$100M dollar volume, strong dry-up, 10%+ ADR
         """
         score = 0.0
         details = {}
 
-        # 1. DOLLAR VOLUME (0-3 points)
-        # Institutional liquidity — can we get in and out without slippage?
+        # 1. DOLLAR VOLUME (0-6 points)
         dollar_vol = row.get("dollar_volume", 0)
         min_dollar_vol = self.config.get("dollar_volume_min", 10_000_000)
 
-        if dollar_vol >= min_dollar_vol * 10:   # >$100M — institutional grade
-            dv_score = 3.0
-        elif dollar_vol >= min_dollar_vol * 5:  # >$50M
+        if dollar_vol >= min_dollar_vol * 10:
+            dv_score = 6.0
+        elif dollar_vol >= min_dollar_vol * 5:
+            dv_score = 5.0
+        elif dollar_vol >= min_dollar_vol * 2:
+            dv_score = 4.0
+        elif dollar_vol >= min_dollar_vol:
             dv_score = 2.5
-        elif dollar_vol >= min_dollar_vol * 2:  # >$20M
-            dv_score = 2.0
-        elif dollar_vol >= min_dollar_vol:       # Meets minimum ($10M)
-            dv_score = 1.5
         else:
             dv_score = 0.0
 
         score += dv_score
         details["dollar_volume"] = dv_score
 
-        # 2. VOLUME DRY-UP (0-4 points) — SINGLE SOURCE OF TRUTH
-        # Volume should contract significantly into the base.
-        # This is the "V" signal in VCP: sellers exhausting themselves.
+        # 2. VOLUME DRY-UP (0-10 points) — SINGLE SOURCE OF TRUTH
+        # the core VCP signal: sellers exhausting into the base
         volume_declining = row.get("volume_declining", False)
         volume_dryup_ratio = row.get("volume_dryup_ratio", 1.0)
 
-        if volume_declining and volume_dryup_ratio < 0.60:    # Very strong dry-up
-            vd_score = 4.0
-        elif volume_declining and volume_dryup_ratio < 0.75:  # Solid dry-up
-            vd_score = 3.0
-        elif volume_declining and volume_dryup_ratio < 0.90:  # Moderate
-            vd_score = 2.0
-        elif volume_dryup_ratio < 1.0:                         # Slight decline
-            vd_score = 1.0
-        else:                                                    # No contraction
+        if volume_declining and volume_dryup_ratio < 0.60:
+            vd_score = 10.0
+        elif volume_declining and volume_dryup_ratio < 0.75:
+            vd_score = 7.5
+        elif volume_declining and volume_dryup_ratio < 0.90:
+            vd_score = 5.0
+        elif volume_dryup_ratio < 1.0:
+            vd_score = 2.5
+        else:
             vd_score = 0.0
 
         score += vd_score
         details["volume_contraction"] = vd_score
 
-        # 3. ADR % — differentiator above the minimum (0-3 points)
-        # ADR is a hard filter at 5%. Here we reward stocks that move more,
-        # since bigger movers produce larger R-multiples on breakouts.
+        # 3. ADR % (0-9 points)
+        # bigger movers = bigger R-multiples on breakouts
+        # partly tautological with max gain but qullamaggie specifically targets high-ADR
         adr_pct = row.get("adr_pct", 0.0)
 
-        if adr_pct >= 0.10:     # 10%+ daily range — high-octane
+        if adr_pct >= 0.10:
+            adr_score = 9.0
+        elif adr_pct >= 0.08:
+            adr_score = 7.0
+        elif adr_pct >= 0.06:
+            adr_score = 5.0
+        elif adr_pct >= 0.05:
             adr_score = 3.0
-        elif adr_pct >= 0.08:   # 8%+ — very good
-            adr_score = 2.5
-        elif adr_pct >= 0.06:   # 6%+ — good
-            adr_score = 2.0
-        elif adr_pct >= 0.05:   # At minimum — adequate
-            adr_score = 1.0
         else:
             adr_score = 0.0
 
@@ -1393,60 +1391,51 @@ class Scoring:
         """
         Score risk/reward setup quality.
 
-        The old scoring evaluated stop distance as an absolute percentage (< 3% = perfect).
-        This is wrong: a 3% stop on a stock with 8% ADR will be hit on random noise.
-        Stops should be sized relative to the stock's own volatility (ADR).
+        Stops sized relative to ADR, not absolute percentage.
 
-        Qullamaggie naturally uses stops relative to daily range — tighter than 1x ADR
-        is too tight and gets shaken out; wider than 2.5x ADR is too much risk.
-
-        Components:
-        - Stop vs ADR ratio (0-7pts): How tight relative to daily volatility
-        - R-multiple potential (0-3pts): Reward vs risk (target cap raised to 40%)
+        Components (raised from 10 to 15 pts):
+        - Stop vs ADR ratio (0-10pts): How tight relative to daily volatility
+        - R-multiple potential (0-5pts): Reward vs risk
 
         Perfect Score: Stop at 0.5-1.0x ADR, 5R+ potential
         """
         score = 0.0
         details = {}
 
-        # 1. STOP DISTANCE RELATIVE TO ADR (0-7 points)
-        # Ideal: stop is 0.5–1.5x the average daily range
-        # Too tight (< 0.5x ADR) → noise stops you out
-        # Too wide (> 2.5x ADR) → you're taking on too much risk per trade
+        # 1. STOP DISTANCE RELATIVE TO ADR (0-10 points)
         stop_distance = row.get("stop_distance_pct", 0.15)
         adr_pct = row.get("adr_pct", 0.05)
         stop_in_adr = stop_distance / max(adr_pct, 0.01)
 
-        if 0.5 <= stop_in_adr <= 1.0:    # Ideal: half to 1x daily range
-            stop_score = 7.0
-        elif stop_in_adr < 0.5:           # Too tight — will get hit on noise
-            stop_score = 2.0
-        elif stop_in_adr <= 1.5:          # Slightly wide but acceptable
-            stop_score = 6.0
-        elif stop_in_adr <= 2.0:          # 2x daily range — manageable
-            stop_score = 4.0
-        elif stop_in_adr <= 2.5:          # Getting wide
-            stop_score = 2.0
-        else:                              # >2.5x ADR — too much risk
+        if 0.5 <= stop_in_adr <= 1.0:
+            stop_score = 10.0
+        elif stop_in_adr < 0.5:
+            stop_score = 3.0
+        elif stop_in_adr <= 1.5:
+            stop_score = 8.0
+        elif stop_in_adr <= 2.0:
+            stop_score = 5.0
+        elif stop_in_adr <= 2.5:
+            stop_score = 3.0
+        else:
             stop_score = 0.0
 
         score += stop_score
         details["stop_vs_adr"] = stop_score
 
-        # 2. R-MULTIPLE POTENTIAL (0-3 points)
-        # Target cap raised from 15% to 40% — breakouts can run far
+        # 2. R-MULTIPLE POTENTIAL (0-5 points)
         potential_r = row.get("potential_r", 0.0)
         min_r = self.config.get("risk_reward_min", 3.0)
 
-        if potential_r >= 5.0:    # 5R+ — exceptional
+        if potential_r >= 5.0:
+            r_score = 5.0
+        elif potential_r >= 4.0:
+            r_score = 4.0
+        elif potential_r >= min_r:
             r_score = 3.0
-        elif potential_r >= 4.0:  # 4R — excellent
-            r_score = 2.5
-        elif potential_r >= min_r:  # 3R — minimum acceptable
-            r_score = 2.0
-        elif potential_r >= 2.0:  # 2R — below target
-            r_score = 1.0
-        else:                      # <2R — poor setup
+        elif potential_r >= 2.0:
+            r_score = 1.5
+        else:
             r_score = 0.0
 
         score += r_score
@@ -1613,7 +1602,7 @@ class Scoring:
         df["score_relative_strength"] = 0.0
         df["score_volume_profile"] = 0.0
         df["score_risk_reward"] = 0.0
-        df["raw_score"] = 0.0   # pre-regime-multiplier — used for grading setup quality
+        df["raw_score"] = 0.0  # pre-regime-multiplier — used for grading setup quality
         df["total_score"] = 0.0  # regime-adjusted — used for ranking and action signals
         df["grade"] = ""
         df["signal"] = ""
@@ -1693,8 +1682,16 @@ class Scoring:
                     "stop_distance": row["stop_distance_pct"],
                     "potential_r": row["potential_r"],
                     "base_days": row["consol_days"],
-                    "base_range_%": round(row.get(f"consol_range_{self.config.get('base_length_max', 60)}", 0) * 100, 1),
-                    "pct_from_52wk_hi": round(row.get("pct_from_52wk_high", 0) * 100, 1),
+                    "base_range_%": round(
+                        row.get(
+                            f"consol_range_{self.config.get('base_length_max', 60)}", 0
+                        )
+                        * 100,
+                        1,
+                    ),
+                    "pct_from_52wk_hi": round(
+                        row.get("pct_from_52wk_high", 0) * 100, 1
+                    ),
                     "stage2": row.get("stage2", False),
                     "vcp": row.get("vcp_contracting", False),
                     "rs_60_excess": round(row.get("rs_comp_60", 0.0) * 100, 1),

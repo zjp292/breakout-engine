@@ -29,12 +29,15 @@ PARAMETERS = {
     "min_adr_pct": 0.05,
     "pct_from_52wk_high_max": 0.30,  # Must be within 30% of 52-week high
     # scoring — weights = max points per category (total = 100)
+    # rebalanced 2026-03 based on 793 outcome correlations with 20d max gain:
+    #   RS (+0.20), volume (+0.21/+0.43), prior move (+0.21) are the real signal
+    #   base quality (-0.03) and trend strength (+0.01) were dead weight at old sizes
     "weights": {
-        "base_quality": 25,      # Tight VCP base structure
-        "trend_strength": 30,    # Stage 2 + 52wk proximity + MA alignment + prior move
-        "relative_strength": 25, # Excess return vs benchmark (corrected formula)
-        "volume_profile": 10,    # Liquidity + volume dry-up (single source)
-        "risk_reward": 10,       # Stop vs ADR ratio + R-multiple
+        "base_quality": 15,      # VCP base structure — demoted, low empirical signal
+        "trend_strength": 15,    # Stage 2 + proximity + MA — sanity check, not differentiator
+        "relative_strength": 30, # RS leadership — strongest confirmed predictor
+        "volume_profile": 25,    # Liquidity + dry-up + ADR — empirically dominant
+        "risk_reward": 15,       # Stop vs ADR + R-multiple — foundational to the strategy
     },
     # alert thresholds
     "min_score_alert": 80,
