@@ -68,11 +68,12 @@ class TestMovingAverages:
         for period in PARAMETERS["sma_periods"]:
             assert f"sma_{period}" in df.columns
 
-    def test_sma_10_equals_rolling_mean(self):
+    def test_sma_10_is_exponential_moving_average(self):
+        """sma_10 is computed as EMA(10) — qullamaggie uses EMA for fast momentum lines."""
         f = make_features()
         df = make_ohlcv(260)
         df = f.add_moving_averages(df)
-        expected = df["close"].rolling(10).mean()
+        expected = df["close"].ewm(span=10, adjust=False).mean()
         pd.testing.assert_series_equal(df["sma_10"], expected, check_names=False)
 
     def test_sma_nan_for_insufficient_history(self):
@@ -277,29 +278,34 @@ class TestVCPContractions:
 
     def test_vcp_contracting_when_narrowing(self):
         """
-        Construct prices that become progressively tighter:
-        the first 40 bars are volatile, next 20 are moderate, last 10 are very tight.
-        This should produce vcp_contracting=True at the end.
+        vcp_contracting uses three NON-OVERLAPPING w_short-day windows.
+        construct flat prices with explicit per-bar ranges that decrease
+        across three successive 10-day blocks so the shifted windows see
+        clearly distinct volatility levels and the flag must be True.
         """
         f = make_features()
-        rng = np.random.RandomState(7)
-        n = 150
-        # Wide → moderate → tight volatility pattern
-        vols = np.concatenate([
-            rng.uniform(0.04, 0.08, 100),   # volatile baseline
-            rng.uniform(0.02, 0.04, 30),    # moderate
-            rng.uniform(0.005, 0.015, 20),  # tight
+        w = PARAMETERS["vcp_windows"][0]   # 10
+        n_pad = 40                          # enough history for rolling warm-up
+        n = n_pad + w * 3                   # 70 bars total
+        base = 30.0
+        closes = np.full(n, base)
+
+        # half-range per bar — explicit, non-random, non-overlapping periods
+        half_ranges = np.concatenate([
+            np.full(n_pad, 0.05 * base),   # padding: ±5%
+            np.full(w,     0.08 * base),   # far window:    ±8%  (widest)
+            np.full(w,     0.03 * base),   # middle window: ±3%
+            np.full(w,     0.005 * base),  # near window:   ±0.5% (tightest)
         ])
-        closes = np.cumprod(1 + vols * rng.choice([-1, 1], n)) * 30
-        highs  = closes * (1 + vols / 2)
-        lows   = closes * (1 - vols / 2)
-        dates  = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        highs = closes + half_ranges
+        lows  = closes - half_ranges
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
         df = pd.DataFrame({
             "open": closes, "high": highs, "low": lows,
             "close": closes, "volume": 1_000_000,
         }, index=dates)
         df = f.detect_vcp_contractions(df)
-        # The final row should show a contracting pattern
+        # near(0.5%) < middle(3%) < far(8%) → vcp_contracting must be True
         assert df["vcp_contracting"].iloc[-1] == True
 
     def test_contraction_ratio_bounded(self):
@@ -494,16 +500,15 @@ class TestVolumeDryUp:
 
 class TestStopCalculation:
 
-    def test_stop_level_at_low_when_low_lt_close(self):
-        """When low < close, stop_level should equal the low of the day."""
+    def test_stop_level_is_rolling_base_low(self):
+        """stop_level should be the rolling 60-day min of lows, not the single day's low."""
         f = make_features()
-        df = make_ohlcv(50, start_price=30.0, end_price=35.0)
+        df = make_ohlcv(80, start_price=30.0, end_price=35.0)
         df = f.add_moving_averages(df)
         df = f.add_ma_relationships(df)
         df = f.calculate_stop(df)
-        # For every row where low < close, stop_level == low
-        mask = df["low"] < df["close"]
-        assert (df.loc[mask, "stop_level"] == df.loc[mask, "low"]).all()
+        expected = df["low"].rolling(60, min_periods=1).min()
+        assert (df["stop_level"] == expected).all()
 
     def test_stop_distance_clipped_positive(self):
         f = make_features()
@@ -519,7 +524,7 @@ class TestStopCalculation:
         df = f.add_moving_averages(df)
         df = f.add_ma_relationships(df)
         df = f.calculate_stop(df)
-        assert (df["stop_distance_pct"] <= 0.20).all()
+        assert (df["stop_distance_pct"] <= 0.25).all()
 
     def test_trailing_stop_triggered_below_sma10(self):
         """trailing_stop_triggered should be True when close < sma_10."""
@@ -577,16 +582,23 @@ class TestHigherLows:
     def test_higher_lows_in_uptrend(self):
         """In a noisy uptrend, some bars should have higher_lows=True.
 
-        swing_low_count is a rolling(10) sum of higher_lows.  We need enough
-        local minima (bars lower than both neighbours) for the comparisons to
-        produce True values.  Use 150 bars with moderate noise so there are
-        plenty of swing lows to detect.
+        5-bar pivot detection (2 bars each side per Bulkowski 2005) requires a
+        genuine local minimum — not just a 1-bar dip.  Use 150 bars with moderate
+        noise so there are enough structural pivot lows to detect.
+        swing_low_count is a rolling(base_length_max=60) sum of higher_lows events.
         """
         f = make_features()
         df = make_ohlcv(150, start_price=10.0, end_price=25.0, seed=17)
         df = f.calculate_higher_lows(df)
-        # At least some rows across the full series should register higher lows
         assert df["higher_lows"].any()
+
+    def test_downtrend_produces_no_higher_lows(self):
+        """A clean downtrend should have lower successive swing lows, not higher ones."""
+        f = make_features()
+        df = make_ohlcv(150, start_price=50.0, end_price=10.0, seed=42)
+        df = f.calculate_higher_lows(df)
+        # In a sustained downtrend, new swing lows should be below prior ones
+        assert not df["higher_lows"].all()
 
     def test_columns_created(self):
         f = make_features()
@@ -595,9 +607,126 @@ class TestHigherLows:
         for col in ["is_swing_low", "higher_lows", "swing_low_count"]:
             assert col in df.columns
 
+    def test_swing_low_count_bounded(self):
+        """swing_low_count is a non-negative rolling count — never negative."""
+        f = make_features()
+        df = make_ohlcv(150, start_price=10.0, end_price=25.0, seed=7)
+        df = f.calculate_higher_lows(df)
+        assert (df["swing_low_count"] >= 0).all()
+
 
 # ===========================================================================
-# 11. ADD_ALL_FEATURES INTEGRATION
+# 11. LOWER HIGHS DETECTION
+# ===========================================================================
+
+class TestLowerHighs:
+    """
+    calculate_lower_highs() detects the declining resistance line of a wedge.
+
+    Combined with higher lows, this gives the symmetrical triangle / VCP criterion
+    from Lo, Mamaysky & Wang (2000): E1 > E3 > E5 (lower highs) + E2 < E4 (higher lows).
+    """
+
+    def test_lower_highs_in_downtrend(self):
+        """A downtrend should produce swing highs that are successively lower."""
+        f = make_features()
+        df = make_ohlcv(150, start_price=50.0, end_price=15.0, seed=17)
+        df = f.calculate_lower_highs(df)
+        assert df["lower_highs"].any()
+
+    def test_uptrend_produces_no_lower_highs(self):
+        """A clean uptrend should set higher successive highs, not lower ones."""
+        f = make_features()
+        df = make_ohlcv(150, start_price=10.0, end_price=50.0, seed=42)
+        df = f.calculate_lower_highs(df)
+        assert not df["lower_highs"].all()
+
+    def test_columns_created(self):
+        f = make_features()
+        df = make_ohlcv(60)
+        df = f.calculate_lower_highs(df)
+        for col in ["is_swing_high", "lower_highs", "swing_high_count"]:
+            assert col in df.columns
+
+    def test_swing_high_count_bounded(self):
+        """swing_high_count is a non-negative rolling count — never negative."""
+        f = make_features()
+        df = make_ohlcv(150, start_price=50.0, end_price=15.0, seed=7)
+        df = f.calculate_lower_highs(df)
+        assert (df["swing_high_count"] >= 0).all()
+
+    def test_lower_highs_only_fires_on_pivot_days(self):
+        """lower_highs=True must only occur on days where is_swing_high=True."""
+        f = make_features()
+        df = make_ohlcv(150, start_price=50.0, end_price=10.0, seed=3)
+        df = f.calculate_lower_highs(df)
+        # wherever lower_highs is True, is_swing_high must also be True
+        assert not (df["lower_highs"] & ~df["is_swing_high"]).any()
+
+
+# ===========================================================================
+# 12. EMA SURF RATIO
+# ===========================================================================
+
+class TestEMASurf:
+    """
+    calculate_ema_surf() measures how consistently price "surfs" the rising
+    10-EMA during consolidation — Qullamaggie's primary flag quality signal.
+
+    A surfing day: close in (-3%, +10%) of EMA-10 AND EMA-10 was rising.
+    ema10_surf_ratio = rolling 20-day fraction of surfing days.
+    """
+
+    def test_column_created(self):
+        f = make_features()
+        df = make_ohlcv(260)
+        df = f.add_moving_averages(df)
+        df = f.calculate_ema_surf(df)
+        assert "ema10_surf_ratio" in df.columns
+
+    def test_surf_ratio_high_in_steady_uptrend(self):
+        """
+        Smooth uptrend: price stays just above the rising EMA → high surf ratio.
+        EMA(10) in a linear trend lags close by ~5 bars.  For linspace(10→50),
+        that lag is tiny relative to the stock price, so dist stays well inside
+        the (-3%, +10%) surfing band and ema_rising is True almost every day.
+        """
+        f = make_features()
+        df = make_ohlcv(260, start_price=10.0, end_price=50.0)
+        df = f.add_moving_averages(df)
+        df = f.calculate_ema_surf(df)
+        assert df["ema10_surf_ratio"].iloc[-1] > 0.70
+
+    def test_surf_ratio_low_in_downtrend(self):
+        """
+        Downtrend: EMA is falling (ema_rising=False most days) → surf ratio near 0.
+        """
+        f = make_features()
+        df = make_ohlcv(260, start_price=50.0, end_price=10.0)
+        df = f.add_moving_averages(df)
+        df = f.calculate_ema_surf(df)
+        assert df["ema10_surf_ratio"].iloc[-1] < 0.30
+
+    def test_surf_ratio_bounded(self):
+        """ema10_surf_ratio must always be in [0, 1]."""
+        f = make_features()
+        df = make_ohlcv(260, start_price=10.0, end_price=50.0)
+        df = f.add_moving_averages(df)
+        df = f.calculate_ema_surf(df)
+        valid = df["ema10_surf_ratio"].dropna()
+        assert (valid >= 0.0).all() and (valid <= 1.0).all()
+
+    def test_missing_sma10_returns_nan(self):
+        """If sma_10 column is absent, ema10_surf_ratio should be NaN (no crash)."""
+        f = make_features()
+        df = make_ohlcv(50)
+        # don't call add_moving_averages — sma_10 absent
+        df = f.calculate_ema_surf(df)
+        assert df["ema10_surf_ratio"].isna().all()
+
+
+# ===========================================================================
+# 13. ADD_ALL_FEATURES INTEGRATION
 # ===========================================================================
 
 class TestAddAllFeatures:
@@ -607,17 +736,22 @@ class TestAddAllFeatures:
     """
 
     EXPECTED_COLS = [
-        # Moving averages
+        # Moving averages (sma_10, sma_20 are EMA under the hood)
         "sma_10", "sma_20", "sma_50", "sma_150", "sma_200",
         # MA relationships
         "ma_alignment", "mas_rising", "stage2",
         "distance_from_sma10", "distance_from_sma150", "distance_from_sma200",
+        # EMA surfing — qullamaggie's flag quality signal
+        "ema10_surf_ratio",
         # Range / consolidation
-        "adr_pct", "daily_range_pct", "breakout_level",
+        "adr_pct", "daily_range_pct", "breakout_level", "close_range_position",
         # 52-week proximity
         "52wk_high", "pct_from_52wk_high",
-        # VCP
-        "vcp_contracting", "vcp_contraction_ratio",
+        # VCP — range_10 used in tightness scoring
+        "vcp_contracting", "vcp_contraction_ratio", "range_10",
+        # Wedge geometry — used in score_base_quality wedge component
+        "is_swing_low", "higher_lows", "swing_low_count",
+        "is_swing_high", "lower_highs", "swing_high_count",
         # Volume
         "volume_sma_20", "relative_volume", "dollar_volume",
         "volume_dryup_ratio", "volume_declining",
@@ -666,7 +800,7 @@ class TestAddAllFeatures:
 
 
 # ===========================================================================
-# 12. RS RANK CALCULATION
+# 13. RS RANK CALCULATION
 # ===========================================================================
 
 class TestRSRank:

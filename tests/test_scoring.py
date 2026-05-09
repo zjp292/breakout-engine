@@ -49,23 +49,28 @@ def make_row(**overrides) -> pd.Series:
         "sma_150": 39.0,
         "sma_200": 36.0,
         # --- MA relationships ---
-        "distance_from_sma10":  0.02,   # 2% above 10 SMA
+        "distance_from_sma10":  0.02,   # 2% above 10 EMA
         "distance_from_sma20":  0.06,
         "distance_from_sma50":  0.14,
         "distance_from_sma150": 0.28,
         "distance_from_sma200": 0.39,
-        "ma_alignment": True,           # sma10 > sma20 > sma50
+        "ma_alignment": True,           # ema10 > ema20 > sma50
         "mas_rising": True,             # all short-term slopes positive
+        "ema10_surf_ratio": 0.80,       # 80% of recent days hugging the rising EMA
         # --- Stage 2 ---
         "stage2": True,
         # --- 52-week proximity ---
         "pct_from_52wk_high": -0.05,    # 5% below high (near breakout)
         # --- Consolidation ---
-        "consol_range_60": 0.04,        # 4% range — tight but not extreme
+        "consol_range_60": 0.04,        # 4% range — 60-day box
+        "range_10": 0.04,               # 4% range — 10-day recent coil (used for tightness)
         "consol_days": 10,              # sweet-spot flag length
         # --- VCP ---
         "vcp_contracting": True,
         "vcp_contraction_ratio": 0.30,
+        # --- Wedge geometry ---
+        "swing_low_count": 0,           # higher-lows pivot events in base window
+        "swing_high_count": 0,          # lower-highs pivot events in base window
         # --- Prior move ---
         "prior_move_pct": 0.30,         # 30% prior move
         "days_since_power_move": 20,
@@ -93,40 +98,43 @@ def make_ideal_row() -> pd.Series:
     """
     Row engineered to achieve the maximum possible raw score of 100.
 
-    Component maxima (rebalanced 2026-03):
-      base_quality       6 + 5 + 4  = 15
-      trend_strength     5 + 4 + 3 + 3 = 15
-      relative_strength  8 + 12 + 10 = 30
-      volume_profile     6 + 10 + 9 = 25
-      risk_reward       10 + 5      = 15
-      TOTAL                         = 100
+    Component maxima (restructured 2026-05):
+      base_quality       6 + 4 + 4 + 6  = 20   (tightness+length+VCP+wedge)
+      trend_strength     5 + 5 + 4 + 6  = 20
+      relative_strength  8 + 12 + 10    = 30
+      volume_profile     6 + 14 + 10    = 30
+      risk_reward        0 (excluded from scoring)
+      TOTAL                             = 100
     """
     return make_row(
-        # base_quality -> 15
-        consol_range_60=0.01,          # tightness = 6
-        consol_days=10,                # length = 5
+        # base_quality -> 20
+        range_10=0.01,                 # tightness = 6 (recent 10-day range)
+        consol_range_60=0.01,          # fallback also tight
+        consol_days=10,                # length = 4
         vcp_contracting=True,
         vcp_contraction_ratio=0.20,    # vcp = 4
-        # trend_strength -> 15
+        swing_low_count=3,             # wedge: hl >= 2
+        swing_high_count=3,            # wedge: lh >= 2 → wedge = 6
+        # trend_strength -> 20
         stage2=True,                   # stage = 5
-        pct_from_52wk_high=-0.03,      # proximity = 4
+        pct_from_52wk_high=-0.03,      # proximity = 5
         ma_alignment=True,
         mas_rising=True,
-        distance_from_sma10=0.02,      # above_10sma + aligned + rising = 3
+        distance_from_sma10=0.02,
+        ema10_surf_ratio=0.80,         # surf_ratio >= 0.75 + aligned + rising = 4
         prior_move_pct=0.50,
-        days_since_power_move=15,      # power_move = 3
+        days_since_power_move=15,      # power_move = 6
         # relative_strength -> 30 (rs_rank handled via score call)
         rs_comp_20=0.15,               # rs_20 = 8
         rs_comp_60=0.25,               # rs_60 = 12
-        # volume_profile -> 25
+        # volume_profile -> 30
         dollar_volume=150_000_000,     # dv = 6  (>= 10x min)
         volume_declining=True,
-        volume_dryup_ratio=0.50,       # vd = 10 (< 0.60)
-        adr_pct=0.12,                  # adr = 9  (>= 10%)
-        # risk_reward -> 15
-        # stop 0.06 / adr 0.12 = 0.5x -> stop_score = 10
+        volume_dryup_ratio=0.50,       # vd = 14 (< 0.60)
+        adr_pct=0.12,                  # adr = 10 (>= 10%)
+        # stop fields kept so the hard-filter still passes (used in filter tests)
         stop_distance_pct=0.06,
-        potential_r=6.0,               # r_score = 5
+        potential_r=6.0,
     )
 
 
@@ -136,18 +144,19 @@ def make_ideal_row() -> pd.Series:
 
 class TestScoreBaseQuality:
     """
-    score_base_quality() decomposes into three independent sub-scores:
-      - Consolidation tightness  (0-6 pts)
-      - Base length              (0-5 pts)
-      - VCP contraction series   (0-4 pts)
-    Max total = 15.
+    score_base_quality() decomposes into four sub-scores (restructured 2026-05):
+      - Recent tightness   (0-6 pts): range_10 — 10-day range, not 60-day box
+      - Base length        (0-4 pts)
+      - VCP contraction    (0-4 pts)
+      - Wedge geometry     (0-6 pts): higher pivot lows + lower pivot highs
+    Max total = 20.
     """
 
     scoring = make_scoring()
 
-    # --- 1a. Tightness thresholds ---
+    # --- 1a. Tightness thresholds (uses range_10, max 6 pts) ---
 
-    @pytest.mark.parametrize("consol_range, expected", [
+    @pytest.mark.parametrize("range_val, expected", [
         (0.00,  6.0),  # extreme edge
         (0.01,  6.0),  # < 2%
         (0.02,  6.0),  # boundary: exactly 2%
@@ -159,44 +168,53 @@ class TestScoreBaseQuality:
         (0.08,  2.0),  # boundary: exactly 8%
         (0.081, 0.0),  # just over 8% — too loose
         (0.20,  0.0),  # very loose
-        (1.00,  0.0),  # default missing value
+        (1.00,  0.0),  # default missing value fallback
     ])
-    def test_tightness(self, consol_range, expected):
-        row = make_row(consol_range_60=consol_range, consol_days=10,
+    def test_tightness(self, range_val, expected):
+        row = make_row(range_10=range_val, consol_days=10,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, details = self.scoring.score_base_quality(row)
         assert details["tightness"] == expected, (
-            f"consol_range={consol_range} -> expected tightness {expected}, got {details['tightness']}"
+            f"range_10={range_val} -> expected tightness {expected}, got {details['tightness']}"
         )
 
-    # --- 1b. Base length thresholds ---
+    def test_tightness_falls_back_to_consol_range_when_range_10_missing(self):
+        """If range_10 is absent, scoring falls back to consol_range_60."""
+        row = make_row(consol_days=10, vcp_contracting=False, vcp_contraction_ratio=1.0)
+        # Remove range_10 to force fallback
+        row = row.drop("range_10")
+        row["consol_range_60"] = 0.01   # should get tightness = 6
+        score, details = self.scoring.score_base_quality(row)
+        assert details["tightness"] == 6.0
+
+    # --- 1b. Base length thresholds (max 4 pts) ---
 
     @pytest.mark.parametrize("days, expected", [
         (0,   0.0),   # < 3 — no base
         (2,   0.0),   # < 3
-        (3,   2.5),   # micro-flag lower bound
-        (4,   2.5),   # micro-flag
-        (5,   5.0),   # sweet-spot lower bound
-        (10,  5.0),   # sweet-spot middle
-        (15,  5.0),   # sweet-spot upper boundary
-        (16,  4.0),   # classic VCP
-        (30,  4.0),   # classic VCP upper boundary
+        (3,   2.0),   # micro-flag lower bound
+        (4,   2.0),   # micro-flag
+        (5,   4.0),   # sweet-spot lower bound
+        (10,  4.0),   # sweet-spot middle
+        (15,  4.0),   # sweet-spot upper boundary
+        (16,  3.5),   # classic VCP
+        (30,  3.5),   # classic VCP upper boundary
         (31,  3.0),   # longer VCP
         (45,  3.0),   # longer VCP upper boundary
         (46,  1.5),   # extended
         (60,  1.5),   # extended upper boundary
-        (61,  0.5),   # too long
-        (90,  0.5),   # way too long
+        (61,  1.0),   # too long
+        (90,  1.0),   # way too long
     ])
     def test_base_length(self, days, expected):
-        row = make_row(consol_range_60=0.04, consol_days=days,
+        row = make_row(consol_days=days,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, details = self.scoring.score_base_quality(row)
         assert details["base_length"] == expected, (
             f"consol_days={days} -> expected length {expected}, got {details['base_length']}"
         )
 
-    # --- 1c. VCP contraction thresholds ---
+    # --- 1c. VCP contraction thresholds (max 4 pts) ---
 
     @pytest.mark.parametrize("contracting, ratio, expected", [
         (True,  0.10, 4.0),   # very strong (ratio <= 0.25)
@@ -212,32 +230,62 @@ class TestScoreBaseQuality:
         (False, 1.00, 0.0),   # flat
     ])
     def test_vcp_contraction(self, contracting, ratio, expected):
-        row = make_row(consol_range_60=0.04, consol_days=10,
+        row = make_row(consol_days=10,
                        vcp_contracting=contracting, vcp_contraction_ratio=ratio)
         score, details = self.scoring.score_base_quality(row)
         assert details["vcp_contraction"] == expected, (
             f"contracting={contracting}, ratio={ratio} -> expected vcp {expected}, got {details['vcp_contraction']}"
         )
 
-    def test_max_score_is_15(self):
-        """Perfect base: tightest range + sweet-spot length + strongest VCP."""
-        row = make_row(consol_range_60=0.01, consol_days=10,
-                       vcp_contracting=True, vcp_contraction_ratio=0.20)
+    # --- 1d. Wedge geometry thresholds (max 6 pts) ---
+
+    @pytest.mark.parametrize("hl_count, lh_count, expected", [
+        (2, 2, 6.0),   # textbook convergence: multiple events both sides
+        (3, 2, 6.0),   # hl >= 2 and lh >= 2 regardless of hl being higher
+        (2, 3, 6.0),
+        (2, 1, 4.5),   # both >= 1, total = 3 >= 3 → well-confirmed
+        (1, 2, 4.5),   # both >= 1, total = 3
+        (3, 1, 4.5),   # both >= 1, total = 4
+        (1, 1, 3.0),   # one event each side — early-stage wedge
+        (2, 0, 2.0),   # ascending base: rising support only, no overhead compression
+        (3, 0, 2.0),
+        (1, 0, 1.0),   # one higher low — minimal structural evidence
+        (0, 1, 0.0),   # lower highs only → descending channel, no credit
+        (0, 2, 0.0),   # lower highs only
+        (0, 0, 0.0),   # no structure
+    ])
+    def test_wedge_geometry(self, hl_count, lh_count, expected):
+        row = make_row(swing_low_count=hl_count, swing_high_count=lh_count)
+        score, details = self.scoring.score_base_quality(row)
+        assert details["wedge_geometry"] == expected, (
+            f"hl={hl_count}, lh={lh_count} -> expected wedge {expected}, got {details['wedge_geometry']}"
+        )
+
+    def test_max_score_is_20(self):
+        """Perfect base: tight recent range + sweet-spot length + strong VCP + full wedge."""
+        row = make_row(
+            range_10=0.01, consol_days=10,
+            vcp_contracting=True, vcp_contraction_ratio=0.20,
+            swing_low_count=3, swing_high_count=3,
+        )
         score, _ = self.scoring.score_base_quality(row)
-        assert score == 15.0
+        assert score == 20.0
 
     def test_min_score_is_0(self):
-        """Worst possible base: loose range, no days, no VCP."""
-        row = make_row(consol_range_60=0.20, consol_days=0,
-                       vcp_contracting=False, vcp_contraction_ratio=1.0)
+        """Worst possible base: loose range, no days, no VCP, no wedge structure."""
+        row = make_row(
+            range_10=0.20, consol_range_60=0.20, consol_days=0,
+            vcp_contracting=False, vcp_contraction_ratio=1.0,
+            swing_low_count=0, swing_high_count=0,
+        )
         score, _ = self.scoring.score_base_quality(row)
         assert score == 0.0
 
     def test_missing_fields_default_gracefully(self):
-        """Missing optional fields should not raise — defaults yield a finite score."""
+        """Missing optional fields should not raise — all missing → score = 0."""
         row = pd.Series({"close": 50.0})  # only close, everything else missing
         score, details = self.scoring.score_base_quality(row)
-        assert 0.0 <= score <= 15.0
+        assert score == 0.0
 
 
 # ===========================================================================
@@ -248,10 +296,10 @@ class TestScoreTrendStrength:
     """
     score_trend_strength() decomposes into four sub-scores:
       - Stage 2 MA structure   (0-5 pts)
-      - 52-wk high proximity   (0-4 pts)
-      - Short-term MA stack    (0-3 pts)
-      - Prior power move       (0-3 pts)
-    Max total = 15.
+      - 52-wk high proximity   (0-5 pts)
+      - Short-term MA stack    (0-4 pts)
+      - Prior power move       (0-6 pts)
+    Max total = 20.
     """
 
     scoring = make_scoring()
@@ -314,17 +362,17 @@ class TestScoreTrendStrength:
     # --- 2b. 52-week high proximity ---
 
     @pytest.mark.parametrize("pct_from_high, expected", [
-        ( 0.00, 4.0),   # at the 52wk high
-        (-0.03, 4.0),   # within 5%
-        (-0.05, 4.0),   # boundary: exactly -5%
-        (-0.06, 3.5),   # just below -5%, within -10%
-        (-0.10, 3.5),   # boundary: exactly -10%
-        (-0.11, 2.5),   # within -15%
-        (-0.15, 2.5),   # boundary: exactly -15%
-        (-0.16, 1.5),   # within -20%
-        (-0.20, 1.5),   # boundary: exactly -20%
-        (-0.21, 0.5),   # within -25%
-        (-0.25, 0.5),   # boundary: exactly -25%
+        ( 0.00, 5.0),   # at the 52wk high
+        (-0.03, 5.0),   # within 5%
+        (-0.05, 5.0),   # boundary: exactly -5%
+        (-0.06, 4.5),   # just below -5%, within -10%
+        (-0.10, 4.5),   # boundary: exactly -10%
+        (-0.11, 3.0),   # within -15%
+        (-0.15, 3.0),   # boundary: exactly -15%
+        (-0.16, 2.0),   # within -20%
+        (-0.20, 2.0),   # boundary: exactly -20%
+        (-0.21, 1.0),   # within -25%
+        (-0.25, 1.0),   # boundary: exactly -25%
         (-0.26, 0.0),   # >25% below
         (-0.50, 0.0),   # far below
     ])
@@ -336,22 +384,27 @@ class TestScoreTrendStrength:
         )
 
     # --- 2c. Short-term MA structure ---
+    # surf_ratio = ema10_surf_ratio: rolling fraction of days price hugged the rising EMA.
+    # replaces the old single-day "above_10sma" binary — surf_ratio is the differentiator.
 
-    @pytest.mark.parametrize("ma_alignment, mas_rising, dist_10, expected", [
-        (True,  True,   0.02,  3.0),   # perfect: aligned + rising + above
-        (True,  True,  -0.02,  3.0),   # at -2% = boundary for above_10sma
-        (True,  True,  -0.025, 2.0),   # aligned + rising, but below 10 SMA
-        (True,  False,  0.02,  1.5),   # aligned + above but not rising
-        (True,  False, -0.05,  1.0),   # aligned only
-        (False, False,  0.05,  0.0),   # poor structure — need sma_10 > sma_20 check
+    @pytest.mark.parametrize("ma_alignment, mas_rising, surf_ratio, expected", [
+        (True,  True,  0.80, 4.0),   # aligned + rising + clean surfing ≥ 0.75
+        (True,  True,  0.55, 3.5),   # aligned + rising + moderate surfing ≥ 0.50
+        (True,  True,  0.30, 3.0),   # aligned + rising, sloppy base
+        (True,  False, 0.70, 2.0),   # aligned + not rising + good surfing ≥ 0.65
+        (True,  False, 0.30, 1.0),   # aligned only, poor surfing
+        (False, False, 0.00, 0.0),   # no alignment, sma_10 < sma_20 → 0
     ])
-    def test_ma_structure(self, ma_alignment, mas_rising, dist_10, expected):
+    def test_ma_structure(self, ma_alignment, mas_rising, surf_ratio, expected):
         row = make_row(ma_alignment=ma_alignment, mas_rising=mas_rising,
-                       distance_from_sma10=dist_10,
+                       ema10_surf_ratio=surf_ratio,
                        # ensure sma_10 <= sma_20 for the False/False case
                        sma_10=48.0, sma_20=49.0)
         _, d = self.scoring.score_trend_strength(row)
-        assert d["ma_structure"] == expected
+        assert d["ma_structure"] == expected, (
+            f"alignment={ma_alignment}, rising={mas_rising}, surf={surf_ratio} "
+            f"-> expected {expected}, got {d['ma_structure']}"
+        )
 
     def test_ma_partial_alignment_10_above_20(self):
         """sma_10 > sma_20 but ma_alignment=False -> 0.5 pt."""
@@ -363,14 +416,14 @@ class TestScoreTrendStrength:
     # --- 2d. Prior power move ---
 
     @pytest.mark.parametrize("prior_move, days_since, expected", [
-        (0.40, 30,  3.0),   # 40%+ and within 30 days
-        (0.40, 31,  2.5),   # 40% but 31 days -> falls to 30%+ tier (<=45d)
-        (0.50, 30,  3.0),   # 50%+ within 30 days
-        (0.30, 45,  2.5),   # 30%+ within 45 days
-        (0.30, 46,  2.0),   # 30% but 46 days -> falls to 20%+ tier (<=60d)
-        (0.20, 60,  2.0),   # 20%+ within 60 days
-        (0.20, 61,  1.0),   # 20% but 61 days -> >= 15% tier (no day limit)
-        (0.15, 999, 1.0),   # 15%+ modest (no recency requirement)
+        (0.40, 30,  6.0),   # 40%+ and within 30 days
+        (0.40, 31,  5.0),   # 40% but 31 days -> falls to 30%+ tier (<=45d)
+        (0.50, 30,  6.0),   # 50%+ within 30 days
+        (0.30, 45,  5.0),   # 30%+ within 45 days
+        (0.30, 46,  4.0),   # 30% but 46 days -> falls to 20%+ tier (<=60d)
+        (0.20, 60,  4.0),   # 20%+ within 60 days
+        (0.20, 61,  2.0),   # 20% but 61 days -> >= 15% tier (no day limit)
+        (0.15, 999, 2.0),   # 15%+ modest (no recency requirement)
         (0.14, 999, 0.0),   # below 15% — no meaningful prior move
         (0.00, 999, 0.0),   # no move
     ])
@@ -381,7 +434,7 @@ class TestScoreTrendStrength:
             f"prior_move={prior_move}, days={days_since} -> expected {expected}, got {d['prior_power_move']}"
         )
 
-    def test_max_score_is_15(self):
+    def test_max_score_is_20(self):
         """Ideal trend: Stage 2, within 5% of high, perfect MAs, 50% move."""
         row = make_row(
             stage2=True,
@@ -390,7 +443,7 @@ class TestScoreTrendStrength:
             prior_move_pct=0.50, days_since_power_move=15,
         )
         score, _ = self.scoring.score_trend_strength(row)
-        assert score == 15.0
+        assert score == 20.0
 
     def test_min_score_is_0(self):
         """Worst trend: below all MAs, far from high, no prior move."""
@@ -505,9 +558,9 @@ class TestScoreVolumeProfile:
     """
     score_volume_profile() decomposes into:
       - Dollar volume      (0-6 pts)
-      - Volume dry-up      (0-10 pts) — single source of truth
-      - ADR %              (0-9 pts)
-    Max total = 25.
+      - Volume dry-up      (0-14 pts) — single source of truth
+      - ADR %              (0-10 pts)
+    Max total = 30.
     """
 
     scoring = make_scoring()
@@ -536,16 +589,16 @@ class TestScoreVolumeProfile:
     # --- 4b. Volume dry-up ---
 
     @pytest.mark.parametrize("declining, ratio, expected", [
-        (True,  0.50, 10.0),   # very strong (ratio < 0.60)
-        (True,  0.59, 10.0),
-        (True,  0.60,  7.5),   # solid (0.60 <= ratio < 0.75)
-        (True,  0.74,  7.5),
-        (True,  0.75,  5.0),   # moderate (0.75 <= ratio < 0.90)
-        (True,  0.89,  5.0),
-        # declining=True, ratio=0.90: falls to `elif ratio < 1.0` -> 2.5
-        (True,  0.90,  2.5),
-        (False, 0.70,  2.5),   # not declining but ratio < 1.0
-        (False, 0.99,  2.5),   # not declining but ratio just below 1
+        (True,  0.50, 14.0),   # very strong (ratio < 0.60)
+        (True,  0.59, 14.0),
+        (True,  0.60, 10.5),   # solid (0.60 <= ratio < 0.75)
+        (True,  0.74, 10.5),
+        (True,  0.75,  7.0),   # moderate (0.75 <= ratio < 0.90)
+        (True,  0.89,  7.0),
+        # declining=True, ratio=0.90: falls to `elif ratio < 1.0` -> 3.5
+        (True,  0.90,  3.5),
+        (False, 0.70,  3.5),   # not declining but ratio < 1.0
+        (False, 0.99,  3.5),   # not declining but ratio just below 1
         (False, 1.00,  0.0),   # no contraction at all
         (False, 1.20,  0.0),   # expanding volume
     ])
@@ -560,13 +613,13 @@ class TestScoreVolumeProfile:
     # --- 4c. ADR % ---
 
     @pytest.mark.parametrize("adr_pct, expected", [
-        (0.10, 9.0),    # 10%+ high-octane
-        (0.15, 9.0),
-        (0.08, 7.0),    # 8%+
-        (0.10 - 1e-9, 7.0),
-        (0.06, 5.0),    # 6%+
-        (0.08 - 1e-9, 5.0),
-        (0.05, 3.0),    # at minimum (5%)
+        (0.10, 10.0),   # 10%+ high-octane
+        (0.15, 10.0),
+        (0.08,  8.0),   # 8%+
+        (0.10 - 1e-9, 8.0),
+        (0.06,  6.0),   # 6%+
+        (0.08 - 1e-9, 6.0),
+        (0.05,  3.0),   # at minimum (5%)
         (0.06 - 1e-9, 3.0),
         (0.049, 0.0),   # below minimum
         (0.00,  0.0),
@@ -577,12 +630,12 @@ class TestScoreVolumeProfile:
         score, d = self.scoring.score_volume_profile(row)
         assert d["adr"] == expected
 
-    def test_max_score_is_25(self):
+    def test_max_score_is_30(self):
         row = make_row(dollar_volume=150_000_000,
                        volume_declining=True, volume_dryup_ratio=0.50,
                        adr_pct=0.12)
         score, _ = self.scoring.score_volume_profile(row)
-        assert score == 25.0
+        assert score == 30.0
 
     def test_min_score_is_0(self):
         row = make_row(dollar_volume=0, volume_declining=False, volume_dryup_ratio=1.5,
@@ -948,8 +1001,9 @@ class TestCalculateTotalScore:
         scoring = make_scoring(regime_multiplier=1.0)
         row = make_ideal_row()
         bd = scoring.calculate_total_score(row, rs_rank=80.0)
+        # risk_reward is excluded from raw_total (always 0 in breakdown)
         component_sum = (bd.base_quality + bd.trend_strength +
-                         bd.relative_strength + bd.volume_profile + bd.risk_reward)
+                         bd.relative_strength + bd.volume_profile)
         assert component_sum == pytest.approx(bd.raw_total, rel=1e-6)
 
     def test_returns_score_breakdown_dataclass(self):
@@ -959,7 +1013,8 @@ class TestCalculateTotalScore:
         assert isinstance(bd, ScoreBreakdown)
 
     def test_details_dict_has_expected_keys(self):
-        """All five detail namespaces must appear in the combined dict."""
+        """All five detail namespaces must appear in the combined dict.
+        rr_ keys are retained for display even though risk_reward=0 in the breakdown."""
         scoring = make_scoring()
         row = make_ideal_row()
         bd = scoring.calculate_total_score(row, rs_rank=50.0)
@@ -989,7 +1044,7 @@ class TestCalculateTotalScore:
         assert 0.0 <= ideal.total <= 100.0
 
         worst = make_row(
-            consol_range_60=1.0, consol_days=0,
+            range_10=1.0, consol_range_60=1.0, consol_days=0,
             stage2=False, distance_from_sma150=-0.50, distance_from_sma200=-0.50,
             pct_from_52wk_high=-0.99, ma_alignment=False, mas_rising=False,
             sma_10=40.0, sma_20=41.0, prior_move_pct=0.0, days_since_power_move=999,
@@ -997,6 +1052,7 @@ class TestCalculateTotalScore:
             dollar_volume=0, volume_declining=False, volume_dryup_ratio=2.0, adr_pct=0.0,
             stop_distance_pct=0.50, potential_r=0.0,
             vcp_contracting=False, vcp_contraction_ratio=1.0,
+            swing_low_count=0, swing_high_count=0,
         )
         bad = scoring.calculate_total_score(worst, rs_rank=5.0)
         assert bad.raw_total == 0.0
@@ -1106,9 +1162,9 @@ class TestScoreDataframe:
         for i in range(1, 5):
             if scored.iloc[i]["passes_filters"]:
                 row = scored.iloc[i]
+                # score_risk_reward is always 0 — excluded from raw_score (2026-05)
                 expected_raw = (row["score_base_quality"] + row["score_trend_strength"] +
-                                row["score_relative_strength"] + row["score_volume_profile"] +
-                                row["score_risk_reward"])
+                                row["score_relative_strength"] + row["score_volume_profile"])
                 assert row["raw_score"] == pytest.approx(expected_raw, rel=1e-6)
 
 
@@ -1151,16 +1207,19 @@ class TestGoldenSnapshot:
         assert scoring.get_signal_strength(bd.total) == "PASS"
 
     def test_component_maxima(self):
-        """Verify each component achieves its documented maximum."""
+        """Verify each component achieves its documented maximum.
+
+        base_quality sub-components (2026-05): tightness(6)+length(4)+VCP(4)+wedge(6)=20
+        """
         scoring = make_scoring(regime_multiplier=1.0)
         row = make_ideal_row()
         bd = scoring.calculate_total_score(row, rs_rank=95.0)
         weights = PARAMETERS["weights"]
-        assert bd.base_quality == weights["base_quality"]         # 15
-        assert bd.trend_strength == weights["trend_strength"]     # 15
+        assert bd.base_quality == weights["base_quality"]           # 20
+        assert bd.trend_strength == weights["trend_strength"]       # 20
         assert bd.relative_strength == weights["relative_strength"] # 30
-        assert bd.volume_profile == weights["volume_profile"]     # 25
-        assert bd.risk_reward == weights["risk_reward"]           # 15
+        assert bd.volume_profile == weights["volume_profile"]       # 30
+        assert bd.risk_reward == weights["risk_reward"]             # 0
 
     def test_weight_totals_sum_to_100(self):
         """Documented weights must sum to 100 — the denominator of the scale."""
