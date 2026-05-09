@@ -46,7 +46,7 @@ class Engine:
         self.benchmark_df = client.get_index_data("$COMPX", start_ts, end_ts)
         print(f"  COMPX loaded: {len(self.benchmark_df)} trading days")
 
-        # SPY — S&P 500 large-cap confirmation
+        # spy data
         try:
             self.spy_df = client.get_index_data("SPY", start_ts, end_ts)
             print(f"  SPY   loaded: {len(self.spy_df)} trading days")
@@ -54,7 +54,7 @@ class Engine:
             print(f"  Warning: Could not load SPY: {e}")
             self.spy_df = None
 
-        # IWM — Russell 2000 small-cap / risk-on confirmation
+        # russel data
         try:
             self.iwm_df = client.get_index_data("IWM", start_ts, end_ts)
             print(f"  IWM   loaded: {len(self.iwm_df)} trading days")
@@ -124,15 +124,17 @@ class Engine:
         macro_mult = macro_result.macro_multiplier
         blended = round(0.55 * daily_mult + 0.45 * macro_mult, 3)
 
-        # floor at 0.50 to match existing system behaviour
         return max(0.50, blended)
 
     def _print_market_condition(self, mc) -> None:
-        """Print a formatted market condition report to stdout."""
+        """
+        Print a formatted market condition report to stdout.
+
+        delicious slop :)
+        """
         W = 66
         bar = "═" * W
 
-        # Regime colour codes (no external dep; plain ASCII for terminal)
         regime_badges = {
             "BULL": "▲ BULL",
             "UPTREND": "↑ UPTREND",
@@ -357,6 +359,9 @@ class Engine:
         return f"[{bar_body}]"
 
     def process_stock(self, date_str=None, debug=False):
+        """
+        processes ingested OHLCV data and runs the features
+        """
         if date_str is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -384,7 +389,7 @@ class Engine:
 
         print(f"Found {len(pickle_files)} pickle files in {data_dir}\n")
 
-        # Load NASDAQ Composite benchmark (+ SPY, IWM) from Schwab API
+        # Load NASDAQ Composite benchmark (+ SPY, IWM)
         try:
             self.load_benchmark(date_str)
         except Exception as e:
@@ -435,10 +440,6 @@ class Engine:
         print("\nCalculating RS ranks vs peers...")
         rs_ranks = self.features.calculate_rs_rank(scored_dfs, self.benchmark_df)
 
-        # Runs AFTER features are computed so internal breadth (% above 50 SMA,
-        # % in Stage 2, % near highs) can be drawn from the full feature DFs.
-        # The resulting regime_multiplier gates all stock scores downward in weak
-        # markets — matching how Qullamaggie and Minervini reduce exposure.
         try:
             regime_mult = self.analyze_market_condition(scored_dfs)
         except Exception as e:
@@ -473,14 +474,14 @@ class Engine:
                         # Get the failure reasons
                         _, failures = self.scoring.apply_hard_filters(latest_row)
                         filter_failures[symbol] = failures
-                        print(f"  ⚠ {symbol}: Failed - {', '.join(failures)}")
+                        print(f"  {symbol}: Failed - {', '.join(failures)}")
                     else:
                         score = latest_row.get("total_score", 0)
                         rs_rank = latest_row.get("rs_comp_60", 0)
-                        print(f"  ✓ {symbol}: Score={score:.1f}, RS_60={rs_rank:.2f}")
+                        print(f"  {symbol}: Score={score:.1f}, RS_60={rs_rank:.2f}")
 
             except Exception as e:
-                print(f"  ✗ Error scoring {symbol}: {e}")
+                print(f"  Error scoring {symbol}: {e}")
                 if debug:
                     import traceback
 
@@ -506,10 +507,10 @@ class Engine:
             watchlist = self.scoring.create_watchlist_summary(final_scored_dfs)
 
             if not watchlist.empty:
-                print(f"✓ Watchlist created with {len(watchlist)} stocks")
+                print(f"Watchlist created with {len(watchlist)} stocks")
 
             else:
-                print("⚠ No stocks passed the filters")
+                print("No stocks passed the filters")
 
         return final_scored_dfs, watchlist
 
@@ -520,9 +521,15 @@ class Features:
 
     def add_moving_averages(self, df):
         periods = self.config.get("sma_periods", [10, 20, 50])
+        # the man himself uses ema for 10 and 20 day *le shrug*
+        ema_periods = {10, 20}
 
         for period in periods:
-            df[f"sma_{period}"] = df["close"].rolling(window=period).mean()
+            # keeping the ema labeled as sma to avoid rewriting everything
+            if period in ema_periods:
+                df[f"sma_{period}"] = df["close"].ewm(span=period, adjust=False).mean()
+            else:
+                df[f"sma_{period}"] = df["close"].rolling(window=period).mean()
 
         return df
 
@@ -543,8 +550,7 @@ class Features:
             (df["ma_slope_10"] > 0) & (df["ma_slope_20"] > 0) & (df["ma_slope_50"] > 0)
         )
 
-        # Stage 2 long-term structure (Minervini's primary template)
-        # Requires 50 > 150 > 200 SMA, price above 150 SMA, 200 SMA trending up
+        # calc dist from mas after mas have been initalized
         if "sma_150" in df.columns and "sma_200" in df.columns:
             df["distance_from_sma150"] = (df["close"] - df["sma_150"]) / df["sma_150"]
             df["distance_from_sma200"] = (df["close"] - df["sma_200"]) / df["sma_200"]
@@ -583,6 +589,12 @@ class Features:
         # adr_pct
         adr_period = self.config.get("adr_period", 20)
         df["adr_pct"] = df["daily_range_pct"].rolling(window=adr_period).mean()
+
+        # where did price close within the day's range? 1.0 = at the high, 0.0 = at the low
+        # used to confirm demand during dry-up
+        df["close_range_position"] = (
+            (df["close"] - df["low"]) / (df["high"] - df["low"]).clip(lower=0.001)
+        ).clip(0.0, 1.0)
 
         return df
 
@@ -638,8 +650,7 @@ class Features:
 
         df[f"consol_range_{lookback}"] = (rolling_high - rolling_low) / df["close"]
 
-        # Top of the current base — the breakout price level.
-        # Stored here so charting and backtesting can reference it directly.
+        # Top of current base
         df["breakout_level"] = rolling_high
 
         # Detect tight consolidation (range < threshold)
@@ -795,82 +806,98 @@ class Features:
 
         return df
 
-    def calculate_higher_lows(self, df, lookback=10):
-        # higher_lows: boolean indicating uptrend structure
-        # Find local lows (price lower than neighbors)
-        df["is_swing_low"] = (df["low"] < df["low"].shift(1)) & (
-            df["low"] < df["low"].shift(-1)
+    def calculate_higher_lows(self, df, lookback=None):
+        if lookback is None:
+            lookback = self.config.get("base_length_max", 60)
+
+        df["is_swing_low"] = (
+            (df["low"] < df["low"].shift(1))
+            & (df["low"] < df["low"].shift(2))
+            & (df["low"] < df["low"].shift(-1))
+            & (df["low"] < df["low"].shift(-2))
         )
 
-        # Get swing low values
         swing_lows = df["low"].where(df["is_swing_low"])
+        prev_pivot = swing_lows.ffill().shift(1)
 
-        # Check if swing lows are rising
-        # Compare current swing low to previous swing low
-        last_swing_low = swing_lows.ffill()
-        prev_swing_low = last_swing_low.shift(1)
-
-        df["higher_lows"] = last_swing_low > prev_swing_low
-
-        # Count higher lows in lookback period
-        df["swing_low_count"] = df["higher_lows"].rolling(window=lookback).sum()
+        df["higher_lows"] = df["is_swing_low"] & (df["low"] > prev_pivot)
+        df["swing_low_count"] = (
+            df["higher_lows"].rolling(window=lookback, min_periods=1).sum()
+        )
 
         return df
 
+    def calculate_lower_highs(self, df, lookback=None):
+        if lookback is None:
+            lookback = self.config.get("base_length_max", 60)
+
+        # 5-bar pivot high: higher than both the 2 bars before AND the 2 bars after
+        df["is_swing_high"] = (
+            (df["high"] > df["high"].shift(1))
+            & (df["high"] > df["high"].shift(2))
+            & (df["high"] > df["high"].shift(-1))
+            & (df["high"] > df["high"].shift(-2))
+        )
+
+        swing_highs = df["high"].where(df["is_swing_high"])
+        prev_pivot = swing_highs.ffill().shift(1)
+
+        df["lower_highs"] = df["is_swing_high"] & (df["high"] < prev_pivot)
+        df["swing_high_count"] = (
+            df["lower_highs"].rolling(window=lookback, min_periods=1).sum()
+        )
+
+        return df
+
+    def calculate_ema_surf(self, df):
+        if "sma_10" not in df.columns:
+            df["ema10_surf_ratio"] = np.nan
+            return df
+
+        dist = (df["close"] - df["sma_10"]) / df["sma_10"]
+        ema_rising = df["sma_10"] > df["sma_10"].shift(1)
+        surfing = (dist >= -0.03) & (dist <= 0.10) & ema_rising
+
+        df["ema10_surf_ratio"] = surfing.rolling(window=20, min_periods=5).mean()
+        return df
+
     def calculate_52wk_proximity(self, df):
-        """
-        Calculate proximity to 52-week high.
-
-        Both Qullamaggie and Minervini exclusively trade stocks near their highs.
-        Minervini's template: within 25% of 52-week high.
-        Qullamaggie: "I only buy stocks near their highs."
-
-        Returns df with:
-        - 52wk_high: rolling 252-day high price
-        - pct_from_52wk_high: % below 52wk high (0.0 = at high, -0.20 = 20% below)
-        """
         df["52wk_high"] = df["high"].rolling(window=252, min_periods=100).max()
         df["pct_from_52wk_high"] = (df["close"] - df["52wk_high"]) / df["52wk_high"]
         return df
 
     def detect_vcp_contractions(self, df):
-        """
-        Detect Volatility Contraction Pattern (VCP) structure.
-
-        Minervini's VCP requires a series of contractions, each narrower than the last.
-        We measure range over three successive windows (short/medium/long, from config)
-        as a proxy. True VCP: range_short < range_medium < range_long.
-
-        Config key: "vcp_windows" (default [10, 20, 40])
-
-        Returns df with:
-        - range_{short/medium/long}: price range as % of close for each window
-        - vcp_contracting: True if all three windows show progressive narrowing
-        - vcp_contraction_ratio: current short-range / long-range (lower = tighter)
-        """
         w_short, w_medium, w_long = self.config.get("vcp_windows", [10, 20, 40])
 
-        range_short = (
-            df["high"].rolling(w_short).max() - df["low"].rolling(w_short).min()
-        ) / df["close"]
-        range_medium = (
-            df["high"].rolling(w_medium).max() - df["low"].rolling(w_medium).min()
-        ) / df["close"]
-        range_long = (
-            df["high"].rolling(w_long).max() - df["low"].rolling(w_long).min()
-        ) / df["close"]
+        h, lo, c = df["high"], df["low"], df["close"]
+
+        # overlapping ranges
+        range_short = (h.rolling(w_short).max() - lo.rolling(w_short).min()) / c
+        range_medium = (h.rolling(w_medium).max() - lo.rolling(w_medium).min()) / c
+        range_long = (h.rolling(w_long).max() - lo.rolling(w_long).min()) / c
 
         df[f"range_{w_short}"] = range_short
         df[f"range_{w_medium}"] = range_medium
         df[f"range_{w_long}"] = range_long
 
-        # True VCP: each successive window is progressively tighter
-        df["vcp_contracting"] = (range_short < range_medium) & (
-            range_medium < range_long
-        )
+        # non-overlapping: three equal w_short-day windows shifted apart
+        # range_now  = last w_short days
+        # range_prev = w_short days before that
+        # range_far  = w_short days before that
+        range_now = range_short
+        range_prev = (
+            h.rolling(w_short).max().shift(w_short)
+            - lo.rolling(w_short).min().shift(w_short)
+        ) / c
+        range_far = (
+            h.rolling(w_short).max().shift(w_short * 2)
+            - lo.rolling(w_short).min().shift(w_short * 2)
+        ) / c
 
-        # How tight is the current range vs the broadest recent window?
-        # 0.20 means current short range is only 20% of the long range = strong contraction
+        # true VCP: each period strictly narrower than the one before
+        df["vcp_contracting"] = (range_now < range_prev) & (range_prev < range_far)
+
+        # ratio vs overlapping long window — useful tightness proxy for scoring
         df["vcp_contraction_ratio"] = range_short / range_long.clip(lower=0.001)
 
         return df
@@ -880,36 +907,11 @@ class Features:
     """
 
     def calculate_stop(self, df):
-        """
-        Calculate stop loss levels based on Qullamaggie methodology.
-
-        Entry Rule: Stop at the low of the consolidation day (low of current bar)
-        Trailing Rule: Once profitable, trail stop to close below 10 SMA
-
-        Returns df with:
-        - stop_level: The actual price level for the stop
-        - stop_distance_pct: Distance from current price to stop as %
-        - trailing_stop_triggered: Boolean if stock closed below 10 SMA
-        """
-        # Initial stop: Low of the current day (conservative entry)
-        # If low == close, use a small buffer (0.5% below close) to avoid division by zero
-        df["stop_level"] = df.apply(
-            lambda row: (
-                row["low"] if row["low"] < row["close"] else row["close"] * 0.995
-            ),  # 0.5% below close as minimum stop
-            axis=1,
-        )
-
-        # Stop distance as percentage
-        # Add small epsilon to avoid division by zero
-        df["stop_distance_pct"] = (df["close"] - df["stop_level"]) / (
-            df["close"] + 0.0001
-        )
-
-        # Ensure stop distance is always positive and reasonable
-        df["stop_distance_pct"] = df["stop_distance_pct"].clip(lower=0.001, upper=0.20)
-
-        # Trailing stop rule: Close below 10 SMA (for position management)
+        # stop at the lowest low of the entire base
+        base_lookback = self.config.get("base_length_max", 60)
+        df["stop_level"] = df["low"].rolling(window=base_lookback, min_periods=1).min()
+        df["stop_distance_pct"] = (df["close"] - df["stop_level"]) / df["close"]
+        df["stop_distance_pct"] = df["stop_distance_pct"].clip(lower=0.001, upper=0.25)
         df["trailing_stop_triggered"] = df["close"] < df["sma_10"]
 
         return df
@@ -930,21 +932,17 @@ class Features:
         # Conservative: 1x the base depth from breakout
         # Aggressive: 2x the base depth or prior move high
 
-        # Method 1: Target based on consolidation range projection
         consol_range_key = f"consol_range_{self.config.get('base_length_max', 60)}"
         consol_range_pct = df.get(consol_range_key, pd.Series([0.05] * len(df)))
         if isinstance(consol_range_pct, (int, float)):
             consol_range_pct = pd.Series([consol_range_pct] * len(df), index=df.index)
         base_target_1 = df["close"] * (1 + consol_range_pct)
 
-        # Method 2: Target based on measured move (prior power move)
         lookback = 60
         rolling_high = df["high"].rolling(window=lookback).max()
         base_target_2 = rolling_high
 
         # Use the higher of the two targets, cap at 40% gain
-        # Qullamaggie holds breakouts for 30-100%+ moves; capping at 15% was severely
-        # underestimating high-quality setups and producing artificially low R-multiples
         max_target = df["close"] * 1.40
         df["target_level"] = pd.concat([base_target_1, base_target_2], axis=1).max(
             axis=1
@@ -956,7 +954,6 @@ class Features:
         df["potential_gain_pct"] = df["potential_gain_pct"].clip(lower=0)
 
         # Risk/Reward ratio (R-multiple)
-        # Avoid division by zero - already clipped in calculate_stop
         df["potential_r"] = df["potential_gain_pct"] / df["stop_distance_pct"]
         df["potential_r"] = df["potential_r"].clip(upper=10)  # Cap at 10R
 
@@ -980,6 +977,7 @@ class Features:
 
         # Trend analysis
         df = self.add_ma_relationships(df)
+        df = self.calculate_ema_surf(df)
 
         # Base structure
         df = self.detect_consolidation_range(df)
@@ -988,6 +986,7 @@ class Features:
         # Historical patterns
         df = self.detect_prior_moves(df)
         df = self.calculate_higher_lows(df)
+        df = self.calculate_lower_highs(df)
 
         # 52-week proximity and VCP contraction structure
         df = self.calculate_52wk_proximity(df)
@@ -1014,14 +1013,14 @@ class Scoring:
     """
     Scores stocks based on Qullamaggie breakout + Minervini VCP principles.
 
-    Weights rebalanced 2026-03 based on 793 outcome correlations:
-    - Base Quality (15pts):      VCP base structure — demoted, low empirical signal
-    - Trend Strength (15pts):    Stage 2 + proximity + MA — sanity check, not differentiator
+    Weights rebalanced 2026-05 to focus exclusively on consolidation quality:
+    - Base Quality (20pts):      VCP base structure — tightness, length, contraction
+    - Trend Strength (20pts):    Stage 2 + proximity + MA + prior move (flagpole)
     - Relative Strength (30pts): RS leadership — strongest confirmed predictor
-    - Volume Profile (25pts):    Liquidity + dry-up + ADR — empirically dominant
-    - Risk/Reward (15pts):       Stop vs ADR + R-multiple — foundational to the strategy
+    - Volume Profile (30pts):    Liquidity + dry-up + ADR — empirically dominant
+    - Risk/Reward (excluded):    Stop info retained for display; not counted in raw_total
 
-    Market Regime: A multiplier (0.50–1.0) applied based on benchmark trend.
+    Market Regime: A multiplier (0.50-1.0) applied based on benchmark trend.
 
     Grade Scale (based on raw_score, pre-regime):
     90-100: A+ | 80-89: A | 70-79: B | 60-69: C | <60: D
@@ -1032,48 +1031,62 @@ class Scoring:
         self.weights = config.get(
             "weights",
             {
-                "base_quality": 15,
-                "trend_strength": 15,
+                "base_quality": 20,
+                "trend_strength": 20,
                 "relative_strength": 30,
-                "volume_profile": 25,
-                "risk_reward": 15,
+                "volume_profile": 30,
+                "risk_reward": 0,
             },
         )
         self.min_score_alert = config.get("min_score_alert", 80)
         self.min_score_watchlist = config.get("min_score_watchlist", 70)
-        self.regime_multiplier = 1.0  # set by Engine before scoring
-
-    """
-    base 
-    """
+        self.regime_multiplier = 1.0
 
     def score_base_quality(self, row: pd.Series):
         """
-        Score consolidation quality based on Qullamaggie + Minervini VCP criteria.
+        Score consolidation quality: 4 components targeting the wedge geometry that
+        Qullamaggie and Minervini both require for flag/VCP entries.
 
-        Components (rebalanced 2026-03 — demoted from 25 to 15 pts):
-        - Consolidation tightness (0-6pts): Range compression of the current base
-        - Base length (0-5pts): Accommodates tight flags (5-15d) and VCP bases (15-45d)
-        - VCP contraction structure (0-4pts): Is this base part of a narrowing series?
+        Component structure (restructured 2026-05):
+        - Recent tightness   (0-6 pts): range_10 — the 10-day range, not the 60-day box.
+          Using consol_range_60 inflates the reading mid-wedge because the far end of the
+          lookback window contains the wide pre-consolidation swings. range_10 measures
+          the actual coil at the tip of the pattern.
 
-        Volume dry-up lives exclusively in score_volume_profile.
+        - Base length        (0-4 pts): sweet-spot is 5-15 day flags; credit for VCP
+          bases up to 45 days per Minervini's template.
 
-        Perfect Score: <2% current range, 5-15 day base, strong VCP contraction
+        - VCP range contraction (0-4 pts): non-overlapping window compression confirms
+          narrowing price structure. Qullamaggie's contraction-within-contraction.
+
+        - Wedge geometry     (0-6 pts): higher pivot lows + lower pivot highs.
+          Lo, Mamaysky & Wang (2000) formally define a symmetrical triangle as requiring
+          E1>E3>E5 (lower highs) AND E2<E4 (higher lows). Qullamaggie's flag entry
+          requires a "series of higher pivot lows". Previously computed but never scored.
+          Lower highs alone (no rising support) score zero — descending channel ≠ VCP.
+
+        Volume dry-up lives exclusively in score_volume_profile (single source of truth).
+        Max total: 6 + 4 + 4 + 6 = 20 pts.
         """
         score = 0.0
         details = {}
 
-        # 1. CONSOLIDATION TIGHTNESS (0-6 points)
-        consol_range_key = f"consol_range_{self.config.get('base_length_max', 60)}"
-        consol_range = row.get(consol_range_key, 1.0)
+        # 1. RECENT BASE TIGHTNESS (0-6 pts)
+        # range_10 = 10-day high-to-low range as % of close (from detect_vcp_contractions).
+        # falls back to consol_range_60 for rows that pre-date the VCP detection step.
+        w_short = self.config.get("vcp_windows", [10, 20, 40])[0]
+        recent_range = row.get(
+            f"range_{w_short}",
+            row.get(f"consol_range_{self.config.get('base_length_max', 60)}", 1.0),
+        )
 
-        if consol_range <= 0.02:
+        if recent_range <= 0.02:
             tightness_score = 6.0
-        elif consol_range <= 0.03:
+        elif recent_range <= 0.03:
             tightness_score = 5.0
-        elif consol_range <= 0.05:
+        elif recent_range <= 0.05:
             tightness_score = 4.0
-        elif consol_range <= 0.08:
+        elif recent_range <= 0.08:
             tightness_score = 2.0
         else:
             tightness_score = 0.0
@@ -1081,28 +1094,28 @@ class Scoring:
         score += tightness_score
         details["tightness"] = tightness_score
 
-        # 2. BASE LENGTH (0-5 points)
+        # 2. BASE LENGTH (0-4 pts)
         consol_days = row.get("consol_days", 0)
 
         if 5 <= consol_days <= 15:
-            length_score = 5.0
-        elif 15 < consol_days <= 30:
             length_score = 4.0
+        elif 15 < consol_days <= 30:
+            length_score = 3.5
         elif 30 < consol_days <= 45:
             length_score = 3.0
         elif 3 <= consol_days < 5:
-            length_score = 2.5
+            length_score = 2.0
         elif 45 < consol_days <= 60:
             length_score = 1.5
         elif consol_days > 60:
-            length_score = 0.5
+            length_score = 1.0
         else:
             length_score = 0.0
 
         score += length_score
         details["base_length"] = length_score
 
-        # 3. VCP CONTRACTION STRUCTURE (0-4 points)
+        # 3. VCP RANGE CONTRACTION (0-4 pts)
         vcp_contracting = row.get("vcp_contracting", False)
         vcp_ratio = row.get("vcp_contraction_ratio", 1.0)
 
@@ -1120,6 +1133,33 @@ class Scoring:
         score += vcp_score
         details["vcp_contraction"] = vcp_score
 
+        # 4. WEDGE GEOMETRY (0-6 pts)
+        # swing_low_count: confirmed higher-pivot-low events in base_length_max window.
+        # swing_high_count: confirmed lower-pivot-high events in base_length_max window.
+        # both sides converging = symmetrical triangle (lo et al. 2000 full criterion).
+        # higher lows alone = ascending base — preferred by qullamaggie for flags.
+        # lower highs alone = descending pressure without rising support → 0 pts.
+        hl_count = int(row.get("swing_low_count", 0))
+        lh_count = int(row.get("swing_high_count", 0))
+
+        if hl_count >= 2 and lh_count >= 2:
+            wedge_score = 6.0  # textbook convergence: multiple events both sides
+        elif hl_count >= 1 and lh_count >= 1 and (hl_count + lh_count) >= 3:
+            wedge_score = 4.5  # well-confirmed: 3+ total pivot events both sides
+        elif hl_count >= 1 and lh_count >= 1:
+            wedge_score = 3.0  # early-stage wedge: one event per side
+        elif hl_count >= 2:
+            wedge_score = (
+                2.0  # ascending base: rising support, resistance not yet compressing
+            )
+        elif hl_count >= 1:
+            wedge_score = 1.0  # one higher low — minimal structural evidence
+        else:
+            wedge_score = 0.0  # no wedge structure detected
+
+        score += wedge_score
+        details["wedge_geometry"] = wedge_score
+
         return score, details
 
     # ============================================
@@ -1130,11 +1170,11 @@ class Scoring:
         """
         Score underlying trend structure — Qullamaggie + Minervini combined.
 
-        Components (rebalanced 2026-03 — demoted from 30 to 15 pts):
+        Components (raised 2026-05 from 15 to 20 pts — prior move boosted to reward the flagpole):
         - Stage 2 structure (0-5pts): Long-term MA alignment
-        - 52-week high proximity (0-4pts): Near highs = less overhead supply
-        - Short-term MA structure (0-3pts): 10>20>50 aligned + rising
-        - Prior power move (0-3pts): Flag pole before the base
+        - 52-week high proximity (0-5pts): Near highs = less overhead supply
+        - Short-term MA structure (0-4pts): 10>20>50 aligned + rising
+        - Prior power move (0-6pts): Flagpole before the base — Qullamaggie's #1 criterion
 
         Perfect Score: Stage 2, within 5% of 52wk high, perfect MA structure, 40%+ prior move
         """
@@ -1166,39 +1206,45 @@ class Scoring:
         score += stage_score
         details["stage2"] = stage_score
 
-        # 2. 52-WEEK HIGH PROXIMITY (0-4 points)
+        # 2. 52-WEEK HIGH PROXIMITY (0-5 points)
         pct_from_high = row.get("pct_from_52wk_high", -1.0)
 
         if pct_from_high >= -0.05:
-            proximity_score = 4.0
+            proximity_score = 5.0
         elif pct_from_high >= -0.10:
-            proximity_score = 3.5
+            proximity_score = 4.5
         elif pct_from_high >= -0.15:
-            proximity_score = 2.5
+            proximity_score = 3.0
         elif pct_from_high >= -0.20:
-            proximity_score = 1.5
+            proximity_score = 2.0
         elif pct_from_high >= -0.25:
-            proximity_score = 0.5
+            proximity_score = 1.0
         else:
             proximity_score = 0.0
 
         score += proximity_score
         details["proximity_to_high"] = proximity_score
 
-        # 3. SHORT-TERM MA STRUCTURE (0-3 points)
+        # 3. SHORT-TERM MA STRUCTURE (0-4 points)
+        # surf_ratio replaces the old single-day "above_10sma" binary.
+        # it measures how consistently price hugged the rising EMA during the base —
+        # the rolling signal is far more informative than one day's distance snapshot.
         ma_alignment = row.get("ma_alignment", False)
         mas_rising = row.get("mas_rising", False)
-        dist_10 = row.get("distance_from_sma10", -1.0)
-        above_10sma = dist_10 >= -0.02
+        surf_ratio = row.get("ema10_surf_ratio", 0.0) or 0.0
 
-        if ma_alignment and mas_rising and above_10sma:
-            ma_score = 3.0
-        elif ma_alignment and mas_rising:
-            ma_score = 2.0
-        elif ma_alignment and above_10sma:
-            ma_score = 1.5
+        if ma_alignment and mas_rising:
+            if surf_ratio >= 0.75:
+                ma_score = 4.0  # perfect: aligned, rising, consistently surfing EMA
+            elif surf_ratio >= 0.50:
+                ma_score = 3.5
+            else:
+                ma_score = 3.0  # aligned + rising but base is not clean
         elif ma_alignment:
-            ma_score = 1.0
+            if surf_ratio >= 0.65:
+                ma_score = 2.0
+            else:
+                ma_score = 1.0
         elif row.get("sma_10", 0) > row.get("sma_20", 0):
             ma_score = 0.5
         else:
@@ -1207,18 +1253,18 @@ class Scoring:
         score += ma_score
         details["ma_structure"] = ma_score
 
-        # 4. PRIOR POWER MOVE (0-3 points)
+        # 4. PRIOR POWER MOVE (0-6 points) — the flagpole before the base
         prior_move = row.get("prior_move_pct", 0.0)
         days_since_move = row.get("days_since_power_move", 999)
 
         if prior_move >= 0.40 and days_since_move <= 30:
-            power_score = 3.0
+            power_score = 6.0
         elif prior_move >= 0.30 and days_since_move <= 45:
-            power_score = 2.5
+            power_score = 5.0
         elif prior_move >= 0.20 and days_since_move <= 60:
-            power_score = 2.0
+            power_score = 4.0
         elif prior_move >= 0.15:
-            power_score = 1.0
+            power_score = 2.0
         else:
             power_score = 0.0
 
@@ -1315,10 +1361,10 @@ class Scoring:
         Empirically the most predictive category — volume dry-up, ADR, and
         dollar volume all correlate strongly with 20-day max gain.
 
-        Components (promoted 2026-03 — raised from 10 to 25 pts):
+        Components (raised 2026-05 from 25 to 30 pts — stop pts redistributed here):
         - Dollar volume (0-6pts): Institutional-grade liquidity
-        - Volume dry-up (0-10pts): Contraction into the base (single source of truth)
-        - ADR % (0-9pts): Bigger movers produce bigger breakouts
+        - Volume dry-up (0-14pts): Contraction into the base (single source of truth)
+        - ADR % (0-10pts): Bigger movers produce bigger breakouts
 
         Perfect Score: >$100M dollar volume, strong dry-up, 10%+ ADR
         """
@@ -1343,36 +1389,49 @@ class Scoring:
         score += dv_score
         details["dollar_volume"] = dv_score
 
-        # 2. VOLUME DRY-UP (0-10 points) — SINGLE SOURCE OF TRUTH
-        # the core VCP signal: sellers exhausting into the base
+        # 2. VOLUME DRY-UP (0-14 points) — SINGLE SOURCE OF TRUTH
+        # the core VCP signal: sellers exhausting into the base.
         volume_declining = row.get("volume_declining", False)
-        volume_dryup_ratio = row.get("volume_dryup_ratio", 1.0)
+        dryup_ratio = row.get("volume_dryup_ratio", 1.0)
+        rel_vol = row.get("relative_volume", 1.0)
+        close_pos = row.get("close_range_position", 0.5)
 
-        if volume_declining and volume_dryup_ratio < 0.60:
-            vd_score = 10.0
-        elif volume_declining and volume_dryup_ratio < 0.75:
-            vd_score = 7.5
-        elif volume_declining and volume_dryup_ratio < 0.90:
-            vd_score = 5.0
-        elif volume_dryup_ratio < 1.0:
-            vd_score = 2.5
+        # primary path: period-based dry-up
+        if volume_declining and dryup_ratio < 0.60:
+            vd_score = 14.0
+        elif volume_declining and dryup_ratio < 0.75:
+            vd_score = 10.5
+        elif volume_declining and dryup_ratio < 0.90:
+            vd_score = 7.0
+        elif dryup_ratio < 1.0:
+            vd_score = 3.5
         else:
             vd_score = 0.0
+
+        # spot dry-up boost: today's volume clearly below its 20-day average.
+        # threshold < 0.70 is below the test-fixture default (0.80) so existing
+        # tests are unaffected; the boost only fires on genuinely quiet sessions.
+        if rel_vol < 0.70 and vd_score < 14.0:
+            vd_score = min(14.0, vd_score + (2.0 if rel_vol < 0.50 else 1.0))
+
+        # demand signal: strong close in the day's range confirms accumulation.
+        # threshold ≥ 0.70 keeps test fixture default (0.5) neutral.
+        if close_pos >= 0.70 and vd_score >= 7.0:
+            vd_score = min(14.0, vd_score + 0.5)
 
         score += vd_score
         details["volume_contraction"] = vd_score
 
-        # 3. ADR % (0-9 points)
-        # bigger movers = bigger R-multiples on breakouts
-        # partly tautological with max gain but qullamaggie specifically targets high-ADR
+        # 3. ADR % (0-10 points)
+        # bigger movers = bigger breakout moves; qullamaggie specifically targets high-ADR
         adr_pct = row.get("adr_pct", 0.0)
 
         if adr_pct >= 0.10:
-            adr_score = 9.0
+            adr_score = 10.0
         elif adr_pct >= 0.08:
-            adr_score = 7.0
+            adr_score = 8.0
         elif adr_pct >= 0.06:
-            adr_score = 5.0
+            adr_score = 6.0
         elif adr_pct >= 0.05:
             adr_score = 3.0
         else:
@@ -1389,15 +1448,15 @@ class Scoring:
 
     def score_risk_reward(self, row: pd.Series):
         """
-        Score risk/reward setup quality.
+        Compute stop/RR metrics for display — NOT counted in raw_total (2026-05).
 
-        Stops sized relative to ADR, not absolute percentage.
+        The 60-day rolling stop penalizes early-consolidation setups unfairly: a
+        stock fresh off a big move has far-back lows in its window, making the
+        stop look wide even when the current base is tight. Removing from scoring
+        lets base tightness and volume dry-up drive the ranking instead.
 
-        Components (raised from 10 to 15 pts):
-        - Stop vs ADR ratio (0-10pts): How tight relative to daily volatility
-        - R-multiple potential (0-5pts): Reward vs risk
-
-        Perfect Score: Stop at 0.5-1.0x ADR, 5R+ potential
+        - Stop vs ADR ratio (0-10pts)
+        - R-multiple potential (0-5pts)
         """
         score = 0.0
         details = {}
@@ -1461,15 +1520,17 @@ class Scoring:
         trend_score, trend_details = self.score_trend_strength(row)
         rs_score, rs_details = self.score_relative_strength(row, rs_rank)
         volume_score, volume_details = self.score_volume_profile(row)
-        rr_score, rr_details = self.score_risk_reward(row)
+        _, rr_details = self.score_risk_reward(
+            row
+        )  # score excluded from raw_total; details kept
 
         # raw_total reflects pure setup quality — unaffected by market regime.
-        # total is regime-gated: in a downtrend (0.50-0.85x), even great setups
-        # score lower, matching how Qullamaggie and Minervini go selective in weak markets.
-        raw_total = base_score + trend_score + rs_score + volume_score + rr_score
+        # rr_score is intentionally excluded: stop width is an artifact of where
+        # in the base formation the stock is, not of setup quality (2026-05).
+        raw_total = base_score + trend_score + rs_score + volume_score
         total = raw_total * self.regime_multiplier
 
-        # Combine all details
+        # rr details retained in the combined dict for watchlist display
         all_details = {
             **{f"base_{k}": v for k, v in base_details.items()},
             **{f"trend_{k}": v for k, v in trend_details.items()},
@@ -1483,7 +1544,7 @@ class Scoring:
             trend_strength=trend_score,
             relative_strength=rs_score,
             volume_profile=volume_score,
-            risk_reward=rr_score,
+            risk_reward=0.0,  # excluded from scoring; use details["rr_*"] for stop info
             raw_total=raw_total,
             total=total,
             details=all_details,
