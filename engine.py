@@ -653,9 +653,16 @@ class Features:
         # Top of current base
         df["breakout_level"] = rolling_high
 
-        # Detect tight consolidation (range < threshold)
-        tight_threshold = self.config.get("range_compression_threshold", 0.05)
-        df["is_tight_consolidation"] = df[f"consol_range_{lookback}"] < tight_threshold
+        w_short = self.config.get("vcp_windows", [10, 20, 40])[0]
+        range_col = f"range_{w_short}"
+        if range_col in df.columns:
+            adr = df["adr_pct"].clip(lower=0.01)
+            df["is_tight_consolidation"] = (df[range_col] / adr) <= 3.5
+        else:
+            tight_threshold = self.config.get("range_compression_threshold", 0.05)
+            df["is_tight_consolidation"] = (
+                df[f"consol_range_{lookback}"] < tight_threshold
+            )
 
         # tight range
         df["consol_days"] = (
@@ -864,6 +871,11 @@ class Features:
     def calculate_52wk_proximity(self, df):
         df["52wk_high"] = df["high"].rolling(window=252, min_periods=100).max()
         df["pct_from_52wk_high"] = (df["close"] - df["52wk_high"]) / df["52wk_high"]
+
+        # 90-day window: for post-crash/post-move setups the 52wk high is a pre-crash
+        # price and unfairly penalizes stocks near their recent flagpole top
+        df["90d_high"] = df["high"].rolling(window=90, min_periods=30).max()
+        df["pct_from_90d_high"] = (df["close"] - df["90d_high"]) / df["90d_high"]
         return df
 
     def detect_vcp_contractions(self, df):
@@ -907,13 +919,22 @@ class Features:
     """
 
     def calculate_stop(self, df):
-        # stop at the lowest low of the entire base
+        # 60-day stop: used by the backtester and for display
         base_lookback = self.config.get("base_length_max", 60)
         df["stop_level"] = df["low"].rolling(window=base_lookback, min_periods=1).min()
         df["stop_distance_pct"] = (df["close"] - df["stop_level"]) / df["close"]
         df["stop_distance_pct"] = df["stop_distance_pct"].clip(lower=0.001, upper=0.25)
-        df["trailing_stop_triggered"] = df["close"] < df["sma_10"]
 
+        # 20-day stop: used by the hard filter. captures actual consolidation
+        # support rather than the 60-day window that includes pre-flagpole lows
+        # for fresh setups (e.g. a stock 30 days into a flag still has crash lows
+        # from 50 days ago in the 60-day window, making stop look artificially wide)
+        df["stop_level_20d"] = df["low"].rolling(window=20, min_periods=5).min()
+        df["stop_distance_20d_pct"] = (
+            (df["close"] - df["stop_level_20d"]) / df["close"]
+        ).clip(lower=0.001, upper=0.50)
+
+        df["trailing_stop_triggered"] = df["close"] < df["sma_10"]
         return df
 
     def calculate_rr(self, df):
@@ -979,6 +1000,8 @@ class Features:
         df = self.add_ma_relationships(df)
         df = self.calculate_ema_surf(df)
 
+        df = self.detect_vcp_contractions(df)
+
         # Base structure
         df = self.detect_consolidation_range(df)
         df = self.calculate_base_depth(df)
@@ -988,9 +1011,8 @@ class Features:
         df = self.calculate_higher_lows(df)
         df = self.calculate_lower_highs(df)
 
-        # 52-week proximity and VCP contraction structure
+        # 52-week proximity
         df = self.calculate_52wk_proximity(df)
-        df = self.detect_vcp_contractions(df)
 
         # Volume patterns
         df = self.detect_volume_drying(
@@ -1074,20 +1096,25 @@ class Scoring:
         # 1. RECENT BASE TIGHTNESS (0-6 pts)
         # range_10 = 10-day high-to-low range as % of close (from detect_vcp_contractions).
         # falls back to consol_range_60 for rows that pre-date the VCP detection step.
+        # normalized by adr_pct so that high-ADR volatile stocks (which have wider
+        # absolute ranges) are judged relative to their own typical daily movement —
+        # a 20% range on a 15%-ADR stock is coiling tight; on a 4%-ADR stock it is not.
         w_short = self.config.get("vcp_windows", [10, 20, 40])[0]
         recent_range = row.get(
             f"range_{w_short}",
             row.get(f"consol_range_{self.config.get('base_length_max', 60)}", 1.0),
         )
+        adr = max(row.get("adr_pct", 0.05), 0.01)
+        tightness_ratio = recent_range / adr  # how many average daily ranges wide?
 
-        if recent_range <= 0.02:
-            tightness_score = 6.0
-        elif recent_range <= 0.03:
-            tightness_score = 5.0
-        elif recent_range <= 0.05:
-            tightness_score = 4.0
-        elif recent_range <= 0.08:
-            tightness_score = 2.0
+        if tightness_ratio <= 0.75:
+            tightness_score = 6.0  # coiling < 1 avg daily range over 10 days
+        elif tightness_ratio <= 1.25:
+            tightness_score = 5.0  # very tight flag
+        elif tightness_ratio <= 2.0:
+            tightness_score = 4.0  # normal consolidation
+        elif tightness_ratio <= 3.5:
+            tightness_score = 2.0  # loose but acceptable
         else:
             tightness_score = 0.0
 
@@ -1163,7 +1190,7 @@ class Scoring:
         return score, details
 
     # ============================================
-    # TREND STRENGTH SCORING (0-30 points)
+    # TREND STRENGTH SCORING (0-20 points)
     # ============================================
 
     def score_trend_strength(self, row: pd.Series):
@@ -1274,7 +1301,7 @@ class Scoring:
         return score, details
 
     # ============================================
-    # RELATIVE STRENGTH SCORING (0-25 points)
+    # RELATIVE STRENGTH SCORING (0-30 points)
     # ============================================
 
     def score_relative_strength(self, row: pd.Series, rs_rank: float = None):
@@ -1351,7 +1378,7 @@ class Scoring:
         return score, details
 
     # ============================================
-    # VOLUME PROFILE SCORING (0-10 points)
+    # VOLUME PROFILE SCORING (0-30 points)
     # ============================================
 
     def score_volume_profile(self, row: pd.Series):
@@ -1524,10 +1551,25 @@ class Scoring:
             row
         )  # score excluded from raw_total; details kept
 
-        # raw_total reflects pure setup quality — unaffected by market regime.
-        # rr_score is intentionally excluded: stop width is an artifact of where
-        # in the base formation the stock is, not of setup quality (2026-05).
-        raw_total = base_score + trend_score + rs_score + volume_score
+        # normalize each component to 0-1, then apply config weights.
+        # with default weights (20/20/30/30) this is equivalent to raw addition.
+        # changing config weights (e.g. from optimizer output) drives live scoring.
+        _maxes = {
+            "base_quality": 20.0,
+            "trend_strength": 20.0,
+            "relative_strength": 30.0,
+            "volume_profile": 30.0,
+        }
+        raw_total = (
+            (base_score / _maxes["base_quality"])
+            * self.weights.get("base_quality", 20.0)
+            + (trend_score / _maxes["trend_strength"])
+            * self.weights.get("trend_strength", 20.0)
+            + (rs_score / _maxes["relative_strength"])
+            * self.weights.get("relative_strength", 30.0)
+            + (volume_score / _maxes["volume_profile"])
+            * self.weights.get("volume_profile", 30.0)
+        )
         total = raw_total * self.regime_multiplier
 
         # rr details retained in the combined dict for watchlist display
@@ -1580,11 +1622,13 @@ class Scoring:
         if row.get("adr_pct", 0) < min_adr:
             failures.append(f"ADR {row.get('adr_pct', 0):.1%} < {min_adr:.1%}")
 
-        # 5. Maximum stop distance — evaluated vs ADR for rationality
-        # A very wide stop in absolute terms might still be reasonable for a volatile stock
-        stop_dist = row.get("stop_distance_pct", 0)
+        # 5. Maximum stop distance — uses 20-day stop (current consolidation support).
+        # the 60-day stop includes pre-flagpole lows for fresh setups, making it
+        # artificially wide. 20-day captures where a trader would actually place
+        # the stop on a flag or VCP entry.
+        stop_dist = row.get("stop_distance_20d_pct", row.get("stop_distance_pct", 0))
         adr = row.get("adr_pct", 0.05)
-        max_stop_adr_multiple = 3.0  # Hard cutoff: stop > 3x ADR is irrational
+        max_stop_adr_multiple = 3.0
         if stop_dist > max_stop_adr_multiple * max(adr, 0.01):
             failures.append(
                 f"Stop distance {stop_dist:.1%} > {max_stop_adr_multiple:.0f}x ADR ({adr:.1%})"
@@ -1592,14 +1636,19 @@ class Scoring:
         elif stop_dist < 0.001:
             failures.append(f"Stop distance {stop_dist:.1%} too tight (< 0.1%)")
 
-        # 6. Must be within 30% of 52-week high
-        # Both Qullamaggie and Minervini only trade stocks near their highs.
-        # Stocks far from highs face heavy overhead supply from trapped longs.
+        # 6. Within 30% of recent high — uses the better of 52wk and 90d windows.
+        # post-crash or post-move setups (COVID recovery, sector rotation) may sit
+        # 50-70% below their 52wk high while being near their 90d flagpole top.
+        # a stock near EITHER window is in a legitimate uptrend for entry purposes.
         max_dist_from_high = self.config.get("pct_from_52wk_high_max", 0.30)
-        pct_from_high = row.get("pct_from_52wk_high", -1.0)
-        if not pd.isna(pct_from_high) and pct_from_high < -max_dist_from_high:
+        pct_52wk = row.get("pct_from_52wk_high", -1.0)
+        pct_90d = row.get("pct_from_90d_high", pct_52wk)
+        pct_52wk = pct_52wk if not pd.isna(pct_52wk) else -1.0
+        pct_90d = pct_90d if not pd.isna(pct_90d) else -1.0
+        pct_from_high = max(pct_52wk, pct_90d)
+        if pct_from_high < -max_dist_from_high:
             failures.append(
-                f"Price {abs(pct_from_high):.1%} below 52wk high (max {max_dist_from_high:.0%})"
+                f"Price {abs(pct_from_high):.1%} below 52wk/90d high (max {max_dist_from_high:.0%})"
             )
 
         return len(failures) == 0, failures
