@@ -64,7 +64,7 @@ class BacktestParams:
     # max days to wait for breakout confirmation (entry_type='breakout' only)
     breakout_window: int = 15
     max_positions:    int   = 10
-    risk_per_trade:   float = 0.02   # fraction of current equity risked per trade
+    risk_per_trade:   float = 0.005  # fraction of current equity risked per trade (Qullamaggie: 0.3-0.5%)
     max_position_pct: float = 0.20   # single-position cap as % of equity
     initial_equity:   float = 100_000.0
     # trim 1: sell 1/3 at N×R, then move stop to entry (breakeven)
@@ -77,8 +77,10 @@ class BacktestParams:
     sma_trail_period: int = 10
     # safety valve: force-exit at close if no trail/stop fires within N days
     max_hold_days: int = 60
-    # min market regime to allow new entries on a scan date; "" = no filter
-    min_regime: str = ""
+    # min market regime to allow new entries on a scan date.
+    # "CAUTION" blocks DOWNTREND entries (10 trades at -0.10R avg in backtesting).
+    # set to "" to allow all regimes including DOWNTREND.
+    min_regime: str = "CAUTION"
 
 
 # ── trade record ──────────────────────────────────────────────────────────────
@@ -96,13 +98,17 @@ class Trade:
     score:             float
     raw_score:         float
     grade:             str
-    market_regime:     str
+    market_regime:     str    # regime as of the scan date
     regime_multiplier: float
     base_quality:      float
     trend_strength:    float
     relative_strength: float
     volume_profile:    float
     risk_reward_score: float
+
+    # entry-date regime (may differ from scan-date regime when market moves during hold)
+    entry_regime:            str   = ""
+    entry_regime_multiplier: float = 1.0
 
     # trim 1 (sell 1/3 of original at 3R, stop → breakeven)
     trim1_date:   str   = ""
@@ -210,9 +216,11 @@ class BacktestResults:
                 "score":            t.score,
                 "raw_score":        t.raw_score,
                 "grade":            t.grade,
-                "market_regime":    t.market_regime,
-                "regime_multiplier": t.regime_multiplier,
-                "base_quality":     t.base_quality,
+                "market_regime":          t.market_regime,
+                "regime_multiplier":      t.regime_multiplier,
+                "entry_regime":           t.entry_regime,
+                "entry_regime_multiplier": t.entry_regime_multiplier,
+                "base_quality":           t.base_quality,
                 "trend_strength":   t.trend_strength,
                 "relative_strength": t.relative_strength,
                 "volume_profile":   t.volume_profile,
@@ -242,6 +250,23 @@ class BacktestResults:
             return pd.DataFrame()
         return (
             df.groupby("market_regime")
+            .agg(
+                trades    = ("r_multiple", "count"),
+                win_rate  = ("r_multiple", lambda x: (x > 0).mean()),
+                avg_r     = ("r_multiple", "mean"),
+                avg_gain  = ("pct_gain", "mean"),
+                avg_hold  = ("hold_days", "mean"),
+            )
+            .round(3)
+        )
+
+    def entry_regime_breakdown(self) -> pd.DataFrame:
+        """performance grouped by the regime on the ACTUAL ENTRY DATE (not scan date)"""
+        df = self.to_dataframe()
+        if df.empty or "entry_regime" not in df.columns:
+            return pd.DataFrame()
+        return (
+            df.groupby("entry_regime")
             .agg(
                 trades    = ("r_multiple", "count"),
                 win_rate  = ("r_multiple", lambda x: (x > 0).mean()),
@@ -359,8 +384,13 @@ class BacktestResults:
 
         regime = self.regime_breakdown()
         if not regime.empty:
-            print("\nperformance by market regime:")
+            print("\nperformance by market regime (scan-date label):")
             print(regime.to_string())
+
+        entry_regime = self.entry_regime_breakdown()
+        if not entry_regime.empty:
+            print("\nperformance by market regime (entry-date label):")
+            print(entry_regime.to_string())
 
         buckets = self.score_bucket_analysis()
         if not buckets.empty:
@@ -481,9 +511,11 @@ class Backtester:
             r = after.iloc[0]
             entry_price  = float(r["open"])
             initial_stop = float(r["low"])
-            # discard if the stock gapped down so far the stop makes no sense
-            if initial_stop >= entry_price:
-                initial_stop = entry_price * 0.98  # 2% floor stop
+            # ensure minimum 2% stop distance — a near-doji entry day (low ≈ open)
+            # produces near-zero risk_per_share, inflating share count catastrophically
+            min_stop_dist = entry_price * 0.02
+            if entry_price - initial_stop < min_stop_dist:
+                initial_stop = entry_price - min_stop_dist
             return r["ds"], entry_price, initial_stop
 
         # breakout mode: wait for a close >= breakout_level within breakout_window days
@@ -506,8 +538,9 @@ class Backtester:
                 nr = nxt.iloc[0]
                 entry_price  = float(nr["open"])
                 initial_stop = float(nr["low"])
-                if initial_stop >= entry_price:
-                    initial_stop = entry_price * 0.98
+                min_stop_dist = entry_price * 0.02
+                if entry_price - initial_stop < min_stop_dist:
+                    initial_stop = entry_price - min_stop_dist
                 return nr["ds"], entry_price, initial_stop
 
         return None  # breakout never triggered
@@ -627,6 +660,31 @@ class Backtester:
 
         print(f"loaded {len(scans)} signals across {scans['scan_date'].nunique()} scan dates")
 
+        # preload market_conditions sorted by date for entry-regime lookups
+        _mc_rows: list[tuple[str, str, float]] = []  # (date, regime, multiplier)
+        try:
+            with sqlite3.connect(DB_PATH) as _mc_conn:
+                for _r in _mc_conn.execute(
+                    "SELECT scan_date, regime, regime_multiplier "
+                    "FROM market_conditions ORDER BY scan_date"
+                ):
+                    _mc_rows.append((str(_r[0] or ""), str(_r[1] or ""), float(_r[2] or 1.0)))
+        except Exception:
+            pass
+
+        def _entry_regime(entry_date: str) -> tuple[str, float]:
+            """return (regime, multiplier) for the most recent MC row on or before entry_date"""
+            lo, hi = 0, len(_mc_rows) - 1
+            result: tuple[str, float] = ("", 1.0)
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if _mc_rows[mid][0] <= entry_date:
+                    result = (_mc_rows[mid][1], _mc_rows[mid][2])
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            return result
+
         # preload all price data and build the global trading calendar
         symbols = scans["symbol"].unique()
         print(f"loading price data for {len(symbols)} symbols...")
@@ -734,25 +792,28 @@ class Backtester:
                 if cost > cash:
                     continue
 
+                _er, _erm = _entry_regime(entry_date)
                 t = Trade(
-                    symbol            = sym,
-                    scan_date         = str(row["scan_date"]),
-                    entry_date        = entry_date,
-                    entry_price       = entry_price,
-                    initial_stop      = initial_stop,
-                    shares            = float(shares),
-                    cost_basis        = cost,
-                    adr_pct           = float(row.get("adr_pct") or 0.06),
-                    score             = float(row.get("score") or 0),
-                    raw_score         = float(row.get("raw_score") or 0),
-                    grade             = str(row.get("grade") or ""),
-                    market_regime     = str(row.get("regime") or ""),
-                    regime_multiplier = float(row.get("mc_rm") or 1.0),
-                    base_quality      = float(row.get("base_quality") or 0),
-                    trend_strength    = float(row.get("trend_strength") or 0),
-                    relative_strength = float(row.get("relative_strength_score") or 0),
-                    volume_profile    = float(row.get("volume_score") or 0),
-                    risk_reward_score = float(row.get("rr_score") or 0),
+                    symbol                   = sym,
+                    scan_date                = str(row["scan_date"]),
+                    entry_date               = entry_date,
+                    entry_price              = entry_price,
+                    initial_stop             = initial_stop,
+                    shares                   = float(shares),
+                    cost_basis               = cost,
+                    adr_pct                  = float(row.get("adr_pct") or 0.06),
+                    score                    = float(row.get("score") or 0),
+                    raw_score                = float(row.get("raw_score") or 0),
+                    grade                    = str(row.get("grade") or ""),
+                    market_regime            = str(row.get("regime") or ""),
+                    regime_multiplier        = float(row.get("mc_rm") or 1.0),
+                    entry_regime             = _er,
+                    entry_regime_multiplier  = _erm,
+                    base_quality             = float(row.get("base_quality") or 0),
+                    trend_strength           = float(row.get("trend_strength") or 0),
+                    relative_strength        = float(row.get("relative_strength_score") or 0),
+                    volume_profile           = float(row.get("volume_score") or 0),
+                    risk_reward_score        = float(row.get("rr_score") or 0),
                 )
                 pos = _OpenPos(
                     trade            = t,
@@ -1254,8 +1315,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-hold",   type=int,   default=60,
         help="safety valve: force exit after N days")
     parser.add_argument("--positions",  type=int,   default=10)
-    parser.add_argument("--risk",       type=float, default=0.02,
-        help="fraction of equity risked per trade (0.02 = 2%%)")
+    parser.add_argument("--risk",       type=float, default=0.005,
+        help="fraction of equity risked per trade (Qullamaggie uses 0.003-0.005)")
     parser.add_argument("--equity",     type=float, default=100_000.0)
     parser.add_argument(
         "--min-regime", default="",
