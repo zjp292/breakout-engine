@@ -24,15 +24,16 @@ PARAMETERS = {
     # risk
     "stop_loss_max_pct": 0.08,
     "risk_reward_min": 3.0,
+    "stop_adr_multiple": 5.0,
     # filtering
     "min_price": 5.0,
     "min_adr_pct": 0.05,
     "pct_from_52wk_high_max": 0.30,
     "weights": {
         "base_quality": 20,
-        "trend_strength": 20,
-        "relative_strength": 30,
-        "volume_profile": 30,
+        "trend_strength": 15,
+        "relative_strength": 20,
+        "volume_profile": 45,
         "risk_reward": 0,
     },
     # alert thresholds
