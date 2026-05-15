@@ -1035,12 +1035,16 @@ class Scoring:
     """
     Scores stocks based on Qullamaggie breakout + Minervini VCP principles.
 
-    Weights rebalanced 2026-05 to focus exclusively on consolidation quality:
-    - Base Quality (20pts):      VCP base structure — tightness, length, contraction
-    - Trend Strength (20pts):    Stage 2 + proximity + MA + prior move (flagpole)
-    - Relative Strength (30pts): RS leadership — strongest confirmed predictor
-    - Volume Profile (30pts):    Liquidity + dry-up + ADR — empirically dominant
-    - Risk/Reward (excluded):    Stop info retained for display; not counted in raw_total
+    Config weights (2026-05 rebalance from backtester attribution r vs r_multiple):
+    - Base Quality   (20pts contrib): raw method output 0-20
+    - Trend Strength (15pts contrib): raw method output 0-20; near-zero predictor (+0.07r)
+    - Relative Strength (20pts contrib): raw method output 0-30; NEGATIVE predictor (-0.20r)
+    - Volume Profile (45pts contrib): raw method output 0-30; dominant predictor (+0.28r)
+    - Risk/Reward    (excluded):     stop info retained for display; not in raw_total
+
+    calculate_total_score normalizes each component: (raw_score / sub_max) * config_weight.
+    Sub-component maxes (denominators): base=20, trend=20, rs=30, volume=30.
+    Config weights (numerators, sum=100): base=20, trend=15, rs=20, volume=45.
 
     Market Regime: A multiplier (0.50-1.0) applied based on benchmark trend.
 
@@ -1311,44 +1315,58 @@ class Scoring:
         RS = excess return (stock% - benchmark%). Positive = outperforming.
         Empirically the strongest confirmed predictor of breakout success.
 
-        Components (promoted 2026-03 — raised from 25 to 30 pts):
-        - 20-day RS (0-8pts): Short-term leadership signal
-        - 60-day RS (0-12pts): Medium-term leadership — most predictive window
-        - RS percentile rank (0-10pts): Rank vs all stocks in this watchlist
+        Components (restructured 2026-05 — 20d replaced by 120d):
+        - 120-day RS (0-12pts): captures the full flagpole cleanly pre-consolidation
+        - 60-day RS (0-8pts): secondary signal, reduced weight (overlaps consolidation)
+        - RS percentile rank (0-10pts): rank vs all stocks in this watchlist
 
-        Perfect Score: +10% 20d excess, +20% 60d excess, top 10% of peers
+        Why 120d > 20d: for a 30-45 day base the 20d window sits entirely inside
+        the consolidation — the stock should be going sideways, so rs_comp_20 near
+        zero is CORRECT behaviour for a healthy setup, not a signal of weakness.
+        The 120d window reaches back past the base to the flagpole itself.
+
+        Peer rank recalibration: the 95th+ percentile stock is often the most
+        widely-watched, most distributed name at the pivot. the 85-95th percentile
+        range captures strong leaders before the crowd finds them.
+
+        Perfect Score: 25%+ 120d excess, 20%+ 60d excess, 85-95th peer rank
         """
         score = 0.0
         details = {}
 
-        # 1. SHORT-TERM RS — 20 days (0-8 points)
-        rs_20 = row.get("rs_comp_20", 0.0)
+        # 1. LONG-TERM RS — 120 days (0-12 points)
+        # 120d captures the full prior move (flagpole) without contamination from the
+        # consolidation period. for a 30-45 day base the flagpole sits cleanly inside
+        # the 120d window while remaining largely outside the 20d and 60d windows.
+        rs_120 = row.get("rs_comp_120", 0.0)
 
-        if rs_20 >= 0.10:
-            rs_20_score = 8.0
-        elif rs_20 >= 0.05:
-            rs_20_score = 6.0
-        elif rs_20 >= 0.02:
-            rs_20_score = 4.0
-        elif rs_20 >= 0.00:
-            rs_20_score = 1.5
+        if rs_120 >= 0.25:
+            rs_120_score = 12.0
+        elif rs_120 >= 0.15:
+            rs_120_score = 9.0
+        elif rs_120 >= 0.08:
+            rs_120_score = 6.0
+        elif rs_120 >= 0.02:
+            rs_120_score = 3.0
+        elif rs_120 >= 0.00:
+            rs_120_score = 1.0
         else:
-            rs_20_score = 0.0
+            rs_120_score = 0.0
 
-        score += rs_20_score
-        details["rs_20_day"] = rs_20_score
+        score += rs_120_score
+        details["rs_120_day"] = rs_120_score
 
-        # 2. MEDIUM-TERM RS — 60 days (0-12 points)
+        # 2. MEDIUM-TERM RS — 60 days (0-8 points)
+        # secondary signal; weight reduced from 12 to 8 because the 60d window overlaps
+        # heavily with the consolidation period, diluting its informativeness.
         rs_60 = row.get("rs_comp_60", 0.0)
 
         if rs_60 >= 0.20:
-            rs_60_score = 12.0
-        elif rs_60 >= 0.15:
-            rs_60_score = 10.0
-        elif rs_60 >= 0.10:
             rs_60_score = 8.0
-        elif rs_60 >= 0.05:
-            rs_60_score = 5.0
+        elif rs_60 >= 0.12:
+            rs_60_score = 6.0
+        elif rs_60 >= 0.06:
+            rs_60_score = 4.0
         elif rs_60 >= 0.00:
             rs_60_score = 1.5
         else:
@@ -1358,15 +1376,17 @@ class Scoring:
         details["rs_60_day"] = rs_60_score
 
         # 3. RS PERCENTILE RANK vs PEERS (0-10 points)
+        # the 85-95th percentile sweet spot: strong leaders before they become
+        # crowded; max 8 pts for the very top (95th+) to reduce distribution risk.
         if rs_rank is not None:
-            if rs_rank >= 90:
-                rank_score = 10.0
-            elif rs_rank >= 80:
+            if rs_rank >= 95:
                 rank_score = 8.0
-            elif rs_rank >= 70:
-                rank_score = 6.0
-            elif rs_rank >= 60:
-                rank_score = 3.0
+            elif rs_rank >= 85:
+                rank_score = 10.0
+            elif rs_rank >= 75:
+                rank_score = 7.0
+            elif rs_rank >= 65:
+                rank_score = 4.0
             else:
                 rank_score = 0.0
 
@@ -1628,7 +1648,7 @@ class Scoring:
         # the stop on a flag or VCP entry.
         stop_dist = row.get("stop_distance_20d_pct", row.get("stop_distance_pct", 0))
         adr = row.get("adr_pct", 0.05)
-        max_stop_adr_multiple = 3.0
+        max_stop_adr_multiple = self.config.get("stop_adr_multiple", 5.0)
         if stop_dist > max_stop_adr_multiple * max(adr, 0.01):
             failures.append(
                 f"Stop distance {stop_dist:.1%} > {max_stop_adr_multiple:.0f}x ADR ({adr:.1%})"
