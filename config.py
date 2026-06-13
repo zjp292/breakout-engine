@@ -45,6 +45,7 @@ PARAMETERS = {
     "min_score_watchlist": 70,
     # market regime gating
     "market_regime": True,
+    "panic_state_floor": 0.40,
     # paper trading
     "paper_trading": {
         "enabled": True,

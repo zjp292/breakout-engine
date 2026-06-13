@@ -96,7 +96,7 @@ class MacroRegimeResult:
     regime_label:     str    # BULL_RUN / CONSOLIDATION / DOWNTREND / …
     direction_score:  float  # −1.0 (bearish) → +1.0 (bullish)
     quality_score:    float  #  0.0 (pure chop) → 1.0 (pure trend)
-    macro_multiplier: float  #  0.60–1.00
+    macro_multiplier: float  #  0.40–1.00 (0.40 floor only in D&M panic state)
 
     # ── Choppiness + ADX ──────────────────────────────────────────────────
     choppiness_14: float   # 14-period CI; <38.2 trending, >61.8 choppy
@@ -135,6 +135,11 @@ class MacroRegimeResult:
     # ── Multi-index confirmation ───────────────────────────────────────────
     spy_above_200: Optional[bool]
     iwm_above_200: Optional[bool]
+
+    # ── Daniel & Moskowitz (2016) panic-state flag ─────────────────────────
+    # panic = market drawdown > 20% over 24 months AND vol is ELEVATED/EXTREME
+    # when True, multiplier floor drops from 0.60 → 0.40 (forecastable crash env)
+    panic_state: bool = False
 
     details: dict = field(default_factory=dict)
 
@@ -260,8 +265,16 @@ class MacroRegimeAnalyzer:
         regime_label = self._REGIME_MATRIX.get(
             (trend_direction, trend_quality), "CONSOLIDATION"
         )
-        base_mult  = self.REGIME_MULTIPLIERS.get(regime_label, 0.72)
-        macro_mult = self._vol_adjusted_multiplier(base_mult, sig)
+        base_mult = self.REGIME_MULTIPLIERS.get(regime_label, 0.72)
+
+        # D&M panic state: forecastable crash environment where momentum inverts
+        # requires BOTH a bear-market drawdown AND current vol spike (not vol alone)
+        panic_state = (
+            sig.get("market_drawdown_24m", 0.0) < -0.20
+            and vol_regime in ("ELEVATED", "EXTREME")
+        )
+
+        macro_mult = self._vol_adjusted_multiplier(base_mult, sig, panic_state)
 
         return MacroRegimeResult(
             trend_direction      = trend_direction,
@@ -295,6 +308,7 @@ class MacroRegimeAnalyzer:
             range_width_pct      = round(sig["range_width_pct"], 4),
             spy_above_200        = sig["spy_above_200"],
             iwm_above_200        = sig["iwm_above_200"],
+            panic_state          = panic_state,
             details              = sig,
         )
 
@@ -365,6 +379,15 @@ class MacroRegimeAnalyzer:
         last_sma200 = sma200.iloc[-1]
         above_200 = bool(current > last_sma200) if pd.notna(last_sma200) else None
 
+        # ── 10. D&M 24-month market drawdown (Daniel & Moskowitz 2016) ────
+        # 504 trading days ≈ 2 years; need at least 1 year to be meaningful
+        n_504 = min(504, len(close) - 1)
+        if n_504 >= 252:
+            close_504 = float(close.iloc[-(n_504 + 1)])
+            market_drawdown_24m = float(close.iloc[-1]) / close_504 - 1.0 if close_504 > 0 else 0.0
+        else:
+            market_drawdown_24m = 0.0
+
         return {
             # Choppiness
             "ci_14":                ci_14,
@@ -396,9 +419,11 @@ class MacroRegimeAnalyzer:
             "pct_from_swing_low":   pct_from_sl,
             "range_width_pct":      range_width,
             # Supplementary
-            "trend_consistency_21": tc_21,
-            "trend_consistency_63": tc_63,
-            "above_200":            above_200,
+            "trend_consistency_21":  tc_21,
+            "trend_consistency_63":  tc_63,
+            "above_200":             above_200,
+            # D&M panic-state input
+            "market_drawdown_24m":   market_drawdown_24m,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -536,7 +561,9 @@ class MacroRegimeAnalyzer:
         elif vol < 0.28: return "ELEVATED"
         else:            return "EXTREME"
 
-    def _vol_adjusted_multiplier(self, base: float, sig: dict) -> float:
+    def _vol_adjusted_multiplier(
+        self, base: float, sig: dict, panic_state: bool = False
+    ) -> float:
         """
         Apply a volatility penalty on top of the base regime multiplier.
 
@@ -550,6 +577,13 @@ class MacroRegimeAnalyzer:
           ELEVATED:       −4% (breakouts need more confirmation)
           EXTREME:        −10% (minimize new longs; very selective)
           + if vol is actively RISING: additional −3% (expansion in progress)
+
+        D&M panic state (Daniel & Moskowitz 2016): when market is down >20% over
+        24 months AND vol is elevated/extreme, momentum strategies invert. The floor
+        drops from 0.60 → panic_state_floor (default 0.40) to allow the full
+        downside multiplier to compress scores during forecastable crash states.
+        Without panic_state the vol penalty alone is insufficient — high vol during
+        a bull-market correction looks the same as vol during a genuine bear panic.
         """
         vol_regime = self._classify_vol(sig)
         penalty = {"CALM": 0.00, "NORMAL": 0.00, "ELEVATED": 0.04, "EXTREME": 0.10}.get(
@@ -558,7 +592,12 @@ class MacroRegimeAnalyzer:
         if sig.get("vol_rising") and vol_regime in ("ELEVATED", "EXTREME"):
             penalty += 0.03
 
-        return max(0.60, round(base - penalty, 2))
+        floor = (
+            self.config.get("panic_state_floor", 0.40)
+            if panic_state
+            else 0.60
+        )
+        return max(floor, round(base - penalty, 2))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Signal implementations

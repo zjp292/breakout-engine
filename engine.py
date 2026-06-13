@@ -1060,6 +1060,16 @@ class Features:
         # price and unfairly penalizes stocks near their recent flagpole top
         df["90d_high"] = df["high"].rolling(window=90, min_periods=30).max()
         df["pct_from_90d_high"] = (df["close"] - df["90d_high"]) / df["90d_high"]
+
+        # george & hwang (2004, JF 59:2145): anchoring-underreaction window
+        # analysts and investors anchor to the 52wk high and systematically discount
+        # further gains when a stock approaches it for the first time after consolidation.
+        # alpha is strongest in the -15% to -3% zone (approaching but not yet extended).
+        # stocks already above -3% (extended) or below -15% (deep base) are excluded.
+        df["approaching_annual_high"] = (
+            (df["pct_from_52wk_high"] > -0.15) &
+            (df["pct_from_52wk_high"] < -0.03)
+        )
         return df
 
     def detect_vcp_contractions(self, df):
@@ -1238,13 +1248,13 @@ class Scoring:
 
     Config weights (2026-06 rebalance: base anti-predictive, RS/volume raised):
     - Base Quality   (10pts contrib): raw method output 0-20; r=-0.023 anti-predictive
-    - Trend Strength (15pts contrib): raw method output 0-22; prior_move is the key signal
+    - Trend Strength (15pts contrib): raw method output 0-14; prior_move is the key signal
     - Relative Strength (25pts contrib): raw method output 0-30; r=+0.076 strongest feature
     - Volume Profile (50pts contrib): raw method output 0-30; dominant predictor (+0.28r)
     - Risk/Reward    (excluded):     stop info retained for display; not in raw_total
 
     calculate_total_score normalizes each component: (raw_score / sub_max) * config_weight.
-    Sub-component maxes (denominators): base=20, trend=22, rs=30, volume=30.
+    Sub-component maxes (denominators): base=20, trend=14, rs=30, volume=30.
     Config weights (numerators, sum=100): base=10, trend=15, rs=25, volume=50.
 
     Market Regime: A multiplier (0.50-1.0) applied based on benchmark trend.
@@ -1422,11 +1432,12 @@ class Scoring:
         Score underlying trend structure — Qullamaggie + Minervini combined.
 
         Components (2026-06: stage2 removed as anti-predictive; proximity removed 2026-06):
-        - Short-term MA       (0-4pts): 10>20>50 aligned + rising
-        - Prior power move    (0-8pts): Flagpole size; 100%+ produces 68.9% breakout rate
-        - Weekly alignment    (penalty -5pts if weekly trend broken)
+        - Short-term MA           (0-4pts):  10>20>50 aligned + rising
+        - Prior power move        (0-8pts):  Flagpole size; 100%+ produces 68.9% breakout rate
+        - Approaching annual high (0-2pts):  George & Hwang (2004) anchoring-underreaction alpha
+        - Weekly alignment        (penalty -5pts if weekly trend broken)
 
-        Sub-max = 12 (4+8; used by calculate_total_score for normalization).
+        Sub-max = 14 (4+8+2; used by calculate_total_score for normalization).
         Stage 2 removed 2026-06: DB analysis (n=4662, prior>=75%) showed
         stage2=True EV=0.195 vs stage2=False EV=0.276 — full Stage 2 stocks are extended;
         fresh breakout stocks (transitioning INTO Stage 2) outperform by 40%.
@@ -1483,7 +1494,20 @@ class Scoring:
         score += power_score
         details["prior_power_move"] = power_score
 
-        # 4. WEEKLY ALIGNMENT SOFT PENALTY (-5 pts if weekly trend broken)
+        # 5. APPROACHING ANNUAL HIGH (0-2 pts) — George & Hwang (2004, JF 59:2145)
+        # anchoring bias causes investors to underreact when a stock approaches its 52wk
+        # high for the first time after a consolidation. the -15% to -3% zone is the
+        # documented alpha window: close enough to create anchoring, far enough to not
+        # be already extended. consol_days >= 10 gates out stocks that haven't formed a base.
+        approaching = row.get("approaching_annual_high", False)
+        consol_days_for_gh = row.get("consol_days", 0)
+        if approaching and consol_days_for_gh >= 10:
+            score += 2.0
+            details["approaching_annual_high"] = 2.0
+        else:
+            details["approaching_annual_high"] = 0.0
+
+        # 6. WEEKLY ALIGNMENT SOFT PENALTY (-5 pts if weekly trend broken)
         # prevents chasing daily-clean setups that are distributing on the weekly chart.
         # default True (no penalty) when weekly data is insufficient.
         if not row.get("weekly_aligned", True):
@@ -1781,12 +1805,12 @@ class Scoring:
         # normalize each component to 0-1, then apply config weights.
         # sub-max is the actual highest possible raw score from each method:
         #   base_quality:  6+4+4+6 = 20 (trigger bar capped at 20)
-        #   trend_strength: 4+8 = 12 (stage2 removed 2026-06: DB shows stage2=T EV=0.195 vs =F EV=0.276)
+        #   trend_strength: 4+8+2 = 14 (approaching_annual_high added 2026-06: GH2004 anchoring alpha)
         #   relative_strength: 12+8+10 = 30 (60d now primary, swapped from 120d)
         #   volume_profile: 6+14+10 = 30 (OBV bonus capped within vd 14)
         _maxes = {
             "base_quality": 20.0,
-            "trend_strength": 12.0,
+            "trend_strength": 14.0,
             "relative_strength": 30.0,
             "volume_profile": 30.0,
         }

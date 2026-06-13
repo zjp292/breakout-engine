@@ -300,6 +300,39 @@ class TestFiftyTwoWeekProximity:
         pd.testing.assert_series_equal(df["pct_from_52wk_high"], expected,
                                        check_names=False)
 
+    def test_approaching_annual_high_in_window(self):
+        """pct_from_52wk_high between -3% and -15% → approaching_annual_high=True."""
+        f = make_features()
+        n = 260
+        # rise to high then pull back 8% — sits in the -3% to -15% anchor zone
+        prices_up = np.linspace(10, 50, n - 20)
+        prices_dn = np.full(20, 50 * 0.92)  # 8% below 52wk high
+        closes = np.concatenate([prices_up, prices_dn])
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame({
+            "open": closes, "high": closes * 1.005,
+            "low": closes * 0.995, "close": closes,
+            "volume": 1_000_000,
+        }, index=dates)
+        df = f.calculate_52wk_proximity(df)
+        assert df.iloc[-1]["approaching_annual_high"] is True or df.iloc[-1]["approaching_annual_high"] == True
+
+    def test_approaching_annual_high_false_when_too_deep(self):
+        """pct_from_52wk_high < -15% → approaching_annual_high=False (too deep in base)."""
+        f = make_features()
+        n = 260
+        prices_up = np.linspace(10, 50, n - 20)
+        prices_dn = np.full(20, 50 * 0.80)  # 20% below 52wk high — outside GH2004 window
+        closes = np.concatenate([prices_up, prices_dn])
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame({
+            "open": closes, "high": closes * 1.005,
+            "low": closes * 0.995, "close": closes,
+            "volume": 1_000_000,
+        }, index=dates)
+        df = f.calculate_52wk_proximity(df)
+        assert df.iloc[-1]["approaching_annual_high"] is False or df.iloc[-1]["approaching_annual_high"] == False
+
 
 # ===========================================================================
 # 5. VCP CONTRACTIONS
@@ -839,7 +872,7 @@ class TestAddAllFeatures:
         # Range / consolidation
         "adr_pct", "daily_range_pct", "breakout_level", "close_range_position",
         # 52-week proximity
-        "52wk_high", "pct_from_52wk_high",
+        "52wk_high", "pct_from_52wk_high", "approaching_annual_high",
         # VCP — range_10 used in tightness scoring
         "vcp_contracting", "vcp_contraction_ratio", "range_10", "vcp_contraction_count",
         # Wedge geometry — used in score_base_quality wedge component
