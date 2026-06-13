@@ -17,7 +17,7 @@ PARAMETERS = {
     "dollar_volume_min": 10_000_000,
     "volume_dryup_window": 10,
     # relative strength
-    "rs_lookback_periods": [20, 60, 120],
+    "rs_lookback_periods": [20, 60, 120, 252],
     "rs_rank_window": 60,
     # prior move
     "prior_move_window": 60,
@@ -31,6 +31,7 @@ PARAMETERS = {
     "pct_from_52wk_high_max": 0.30,
     "min_prior_move_pct": 0.75,
     "min_consol_days": 5,
+    "require_positive_rs_252": True,
     "weights": {
         "base_quality": 10,
         "trend_strength": 15,

@@ -92,6 +92,7 @@ def make_row(**overrides) -> pd.Series:
         "volume_sma_20": 500_000,
         "close_range_position": 0.50,   # mid-range close — demand bonus threshold is 0.70
         # --- Relative strength ---
+        "rs_comp_252": 0.10,           # 10% 12-month excess return — passes rs_252 filter
         "rs_comp_120": 0.15,
         "rs_comp_60":  0.12,
         # --- Risk / reward ---
@@ -879,7 +880,7 @@ class TestScoreRiskReward:
 
 class TestApplyHardFilters:
     """
-    apply_hard_filters() must independently catch each of the 6 conditions.
+    apply_hard_filters() must independently catch each of the 9 conditions.
     A row that fails one filter should still report all other failures.
     """
 
@@ -1125,6 +1126,61 @@ class TestApplyHardFilters:
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes is False
         assert any("Consolidation" in f for f in failures)
+
+    # --- Filter 9: 12-month RS gate (AQR momentum universe, Moskowitz et al. 2012) ---
+
+    def test_filter_rs_252_negative_fails(self):
+        """stock that underperformed NASDAQ over 12M is not a momentum leader."""
+        row = self._passing_row()
+        row["rs_comp_252"] = -0.10
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes is False
+        assert any("12-month RS" in f for f in failures)
+
+    def test_filter_rs_252_positive_passes(self):
+        """stock that outperformed NASDAQ over 12M clears the gate."""
+        row = self._passing_row()
+        row["rs_comp_252"] = 0.05
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_exactly_zero_passes(self):
+        """matching NASDAQ exactly (rs_252=0) is not underperformance."""
+        row = self._passing_row()
+        row["rs_comp_252"] = 0.0
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_missing_skipped(self):
+        """no rs_comp_252 key (< 252 bars of history) → filter silently skipped."""
+        row = self._passing_row()
+        row = row.drop("rs_comp_252", errors="ignore")
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_nan_skipped(self):
+        """NaN rs_comp_252 (insufficient history) → filter silently skipped."""
+        row = self._passing_row()
+        row["rs_comp_252"] = float("nan")
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_disabled_by_config(self):
+        """require_positive_rs_252=False disables the gate entirely."""
+        import copy
+        from config import PARAMETERS
+        cfg = copy.deepcopy(PARAMETERS)
+        cfg["require_positive_rs_252"] = False
+        s = Scoring(cfg)
+        row = self._passing_row()
+        row["rs_comp_252"] = -0.50
+        passes, failures = s.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
 
 
 # ===========================================================================

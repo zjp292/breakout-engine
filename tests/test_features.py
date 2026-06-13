@@ -437,15 +437,26 @@ class TestRelativeStrength:
         assert rs_60 < 0.0, f"Expected negative RS for underperformer, got {rs_60}"
 
     def test_rs_columns_created_for_all_periods(self):
-        """Columns rs_comp_20, rs_comp_60, rs_comp_120 must be present."""
+        """Columns rs_comp_20, rs_comp_60, rs_comp_120, rs_comp_252 must be present."""
         n = 130
         stock_p = np.linspace(10, 15, n)
         bench_p = np.linspace(100, 110, n)
         s_df, b_df = self._aligned_pair(stock_p, bench_p, n)
         f = make_features()
         s_df = f.calculate_relative_strength(s_df, b_df, "COMP")
-        for period in [20, 60, 120]:
+        for period in [20, 60, 120, 252]:
             assert f"rs_comp_{period}" in s_df.columns
+
+    def test_rs_252_is_nan_for_short_history(self):
+        """< 252 bars of history → rs_comp_252 is all NaN (column still created)."""
+        n = 130
+        stock_p = np.linspace(10, 15, n)
+        bench_p = np.linspace(100, 110, n)
+        s_df, b_df = self._aligned_pair(stock_p, bench_p, n)
+        f = make_features()
+        s_df = f.calculate_relative_strength(s_df, b_df, "COMP")
+        assert "rs_comp_252" in s_df.columns
+        assert s_df["rs_comp_252"].isna().all()
 
     def test_equal_performance_rs_near_zero(self):
         """If stock and benchmark move identically, RS should be near 0."""
@@ -818,14 +829,14 @@ class TestAddAllFeatures:
         df = make_ohlcv(260, start_price=10.0, end_price=50.0)
         bench = make_ohlcv(260, start_price=100.0, end_price=130.0)
         result = f.add_all_features(df, benchmark_df=bench)
-        for period in [20, 60, 120]:
+        for period in [20, 60, 120, 252]:
             assert f"rs_comp_{period}" in result.columns
 
     def test_rs_columns_absent_without_benchmark(self):
         f = make_features()
         df = make_ohlcv(260)
         result = f.add_all_features(df, benchmark_df=None)
-        for period in [20, 60, 120]:
+        for period in [20, 60, 120, 252]:
             assert f"rs_comp_{period}" not in result.columns
 
     def test_no_exceptions_on_short_history(self):

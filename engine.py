@@ -826,7 +826,7 @@ class Features:
         """
         benchmark_aligned = benchmark_df.reindex(df.index, method="ffill")
 
-        for period in [20, 60, 120]:
+        for period in [20, 60, 120, 252]:
             stock_pct_change = df["close"].pct_change(periods=period)
 
             if "close" in benchmark_aligned.columns:
@@ -1921,6 +1921,17 @@ class Scoring:
             failures.append(
                 f"Consolidation {consol}d < {min_consol}d minimum — not in a base"
             )
+
+        # 9. 12-month RS must not underperform NASDAQ — AQR momentum universe gate.
+        # Moskowitz et al. (2012) and AQR live indices require stocks to have beaten
+        # their benchmark over the prior year to qualify as momentum candidates.
+        # NaN = fewer than 252 bars of history → silently skipped (graceful degradation).
+        if self.config.get("require_positive_rs_252", True):
+            rs_252 = row.get("rs_comp_252", np.nan)
+            if not pd.isna(rs_252) and rs_252 < 0.0:
+                failures.append(
+                    f"12-month RS {rs_252:.1%} vs NASDAQ — not a 12M leader"
+                )
 
         return len(failures) == 0, failures
 
