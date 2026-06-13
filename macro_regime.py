@@ -252,7 +252,7 @@ class MacroRegimeAnalyzer:
         quality_score   = self._score_quality(sig)
 
         # Three-dimensional classification
-        trend_direction = self._classify_direction(direction_score)
+        trend_direction = self._classify_direction(direction_score, sig)
         trend_quality   = self._classify_quality(quality_score)
         vol_regime      = self._classify_vol(sig)
 
@@ -504,9 +504,14 @@ class MacroRegimeAnalyzer:
     # Classification
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _classify_direction(self, score: float) -> str:
+    def _classify_direction(self, score: float, sig: dict) -> str:
         """Thresholds chosen to require meaningful conviction in either direction."""
-        if score >=  0.20: return "BULLISH"
+        if score >= 0.20:
+            # if both short-term signals show current decline, cap at NEUTRAL
+            # long-term averages can look bullish while the market is actively falling
+            if sig.get("mom_21d", 0) < 0 and sig.get("slope_21", 0) < 0:
+                return "NEUTRAL"
+            return "BULLISH"
         if score <= -0.20: return "BEARISH"
         return "NEUTRAL"
 

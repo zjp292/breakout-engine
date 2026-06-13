@@ -106,10 +106,11 @@ class ScanPersistence:
                     target_reached      INTEGER DEFAULT 0,
                     days_to_breakout    INTEGER,
                     days_to_stop        INTEGER,
-                    max_gain_10d        REAL,
-                    max_gain_20d        REAL,
-                    max_gain_60d        REAL,
-                    max_drawdown_20d    REAL,
+                    max_gain_10d           REAL,
+                    max_gain_20d           REAL,
+                    max_gain_60d           REAL,
+                    max_drawdown_20d       REAL,
+                    breakout_day_rel_volume REAL,
                     UNIQUE(scan_date, symbol, outcome_date)
                 );
 
@@ -142,14 +143,55 @@ class ScanPersistence:
                 CREATE INDEX IF NOT EXISTS idx_scans_score    ON scans(score DESC);
                 CREATE INDEX IF NOT EXISTS idx_scans_filtered ON scans(passes_filters);
                 CREATE INDEX IF NOT EXISTS idx_outcomes_scan  ON outcomes(scan_date, symbol);
+
+                CREATE TABLE IF NOT EXISTS paper_trades (
+                    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol                  TEXT    NOT NULL,
+                    scan_date               TEXT    NOT NULL,
+                    signal_score            REAL,
+                    signal_raw_score        REAL,
+                    signal_grade            TEXT,
+                    market_regime           TEXT,
+                    regime_multiplier       REAL,
+                    -- filled after buy order executes
+                    entry_date              TEXT,
+                    entry_price             REAL,
+                    shares                  INTEGER,
+                    position_value          REAL,
+                    -- levels copied from scans table at signal time
+                    scan_stop_level         REAL,
+                    scan_breakout_level     REAL,
+                    scan_price              REAL,
+                    -- alpaca order ids
+                    alpaca_order_id         TEXT,
+                    alpaca_stop_order_id    TEXT,
+                    -- state: submitted → open → exiting → closed | cancelled
+                    status                  TEXT    DEFAULT 'submitted',
+                    exit_reason             TEXT,   -- stop_order | stop_cross | ma_cross | manual
+                    exit_date               TEXT,
+                    exit_price              REAL,
+                    exit_order_id           TEXT,
+                    pnl_pct                 REAL,
+                    pnl_dollars             REAL,
+                    created_at              TEXT    DEFAULT (datetime('now')),
+                    updated_at              TEXT    DEFAULT (datetime('now')),
+                    UNIQUE(scan_date, symbol)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
+                CREATE INDEX IF NOT EXISTS idx_paper_trades_symbol ON paper_trades(symbol);
             """)
 
-        # Schema migration: add raw_score to existing databases that predate this column
+        # Schema migrations: add columns to existing databases
         with self._connect() as conn:
-            try:
-                conn.execute("ALTER TABLE scans ADD COLUMN raw_score REAL")
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            for table, col, defn in [
+                ("scans",    "raw_score",               "REAL"),
+                ("outcomes", "breakout_day_rel_volume",  "REAL"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
     # ── Write ────────────────────────────────────────────────────────────────
 
@@ -332,16 +374,69 @@ class ScanPersistence:
                     entry_price, current_price, pct_change,
                     breakout_triggered, stop_triggered, target_reached,
                     days_to_breakout, days_to_stop,
-                    max_gain_10d, max_gain_20d, max_gain_60d, max_drawdown_20d
+                    max_gain_10d, max_gain_20d, max_gain_60d, max_drawdown_20d,
+                    breakout_day_rel_volume
                 ) VALUES (
                     :scan_date, :symbol, :outcome_date, :days_elapsed,
                     :entry_price, :current_price, :pct_change,
                     :breakout_triggered, :stop_triggered, :target_reached,
                     :days_to_breakout, :days_to_stop,
-                    :max_gain_10d, :max_gain_20d, :max_gain_60d, :max_drawdown_20d
+                    :max_gain_10d, :max_gain_20d, :max_gain_60d, :max_drawdown_20d,
+                    :breakout_day_rel_volume
                 )
             """, outcomes)
         return len(outcomes)
+
+    # ── Paper trades ─────────────────────────────────────────────────────────
+
+    def save_paper_trade(self, record: dict) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute("""
+                INSERT OR REPLACE INTO paper_trades (
+                    symbol, scan_date, signal_score, signal_raw_score, signal_grade,
+                    market_regime, regime_multiplier, shares,
+                    scan_stop_level, scan_breakout_level, scan_price,
+                    alpaca_order_id, alpaca_stop_order_id, status
+                ) VALUES (
+                    :symbol, :scan_date, :signal_score, :signal_raw_score, :signal_grade,
+                    :market_regime, :regime_multiplier, :shares,
+                    :scan_stop_level, :scan_breakout_level, :scan_price,
+                    :alpaca_order_id, :alpaca_stop_order_id, :status
+                )
+            """, record)
+            return cursor.lastrowid
+
+    def update_paper_trade(self, trade_id: int, **fields) -> None:
+        if not fields:
+            return
+        set_clause = ", ".join(f"{k} = :{k}" for k in fields)
+        fields["_id"] = trade_id
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE paper_trades SET {set_clause}, updated_at = datetime('now') WHERE id = :_id",
+                fields,
+            )
+
+    def load_paper_trades(self, status: str = None) -> pd.DataFrame:
+        if status:
+            sql    = "SELECT * FROM paper_trades WHERE status = ? ORDER BY created_at DESC"
+            params = [status]
+        else:
+            sql    = "SELECT * FROM paper_trades ORDER BY created_at DESC"
+            params = []
+        with self._connect() as conn:
+            return pd.read_sql_query(sql, conn, params=params)
+
+    def get_paper_trades_by_status(self, status: str) -> pd.DataFrame:
+        return self.load_paper_trades(status=status)
+
+    def get_open_symbols(self) -> list:
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT symbol FROM paper_trades
+                WHERE status IN ('submitted', 'open', 'exiting')
+            """).fetchall()
+        return [r[0] for r in rows]
 
     # ── Read ─────────────────────────────────────────────────────────────────
 
@@ -351,15 +446,17 @@ class ScanPersistence:
         to_date: str = None,
         passed_only: bool = False,
         min_score: float = None,
+        min_raw_score: float = None,
     ) -> pd.DataFrame:
         """
         Load historical scan records as a DataFrame.
 
         Args:
-            from_date:   Inclusive start date 'YYYY-MM-DD'.
-            to_date:     Inclusive end date 'YYYY-MM-DD'.
-            passed_only: If True, only return stocks that passed hard filters.
-            min_score:   If set, only return stocks with score >= min_score.
+            from_date:     Inclusive start date 'YYYY-MM-DD'.
+            to_date:       Inclusive end date 'YYYY-MM-DD'.
+            passed_only:   If True, only return stocks that passed hard filters.
+            min_score:     If set, only return stocks with total score >= min_score.
+            min_raw_score: If set, only return stocks with raw_score >= min_raw_score.
         """
         clauses, params = [], []
         if from_date:
@@ -370,6 +467,8 @@ class ScanPersistence:
             clauses.append("passes_filters = 1")
         if min_score is not None:
             clauses.append("score >= ?"); params.append(min_score)
+        if min_raw_score is not None:
+            clauses.append("raw_score >= ?"); params.append(min_raw_score)
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as conn:

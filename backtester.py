@@ -81,6 +81,13 @@ class BacktestParams:
     # "CAUTION" blocks DOWNTREND entries (10 trades at -0.10R avg in backtesting).
     # set to "" to allow all regimes including DOWNTREND.
     min_regime: str = "CAUTION"
+    # mirror the live scanner's min_consol_days filter so backtest and live agree on universe.
+    # set to 0 or None to disable (runs against all historical records including pre-605 data).
+    min_consol_days: Optional[int] = 5
+    # cap loss on any single trade at N×R regardless of gap-down fill.
+    # protects against binary events (FDA, earnings, fraud) on high-ADR stocks.
+    # set to None to disable (raw gap fills, which produced -22R single trades historically).
+    max_loss_r: Optional[float] = 5.0
 
 
 # ── trade record ──────────────────────────────────────────────────────────────
@@ -338,6 +345,10 @@ class BacktestResults:
         print(f"  {'max hold':<26} {p.max_hold_days}d safety valve")
         if p.min_regime:
             print(f"  {'min regime':<26} {p.min_regime}+")
+        if p.min_consol_days:
+            print(f"  {'min consol_days':<26} {p.min_consol_days}d")
+        if p.max_loss_r:
+            print(f"  {'max loss / trade':<26} {p.max_loss_r:.0f}R cap")
         print(f"  {'max positions':<26} {p.max_positions}")
         print(f"  {'risk / trade':<26} {p.risk_per_trade:.1%}")
         print(f"  {'initial equity':<26} ${p.initial_equity:>12,.0f}")
@@ -442,6 +453,9 @@ class Backtester:
             max_score_clause = f" AND {score_expr} <= ?"
             max_score_params = [p.max_score]
 
+        min_consol = p.min_consol_days if p.min_consol_days is not None else 0
+        consol_clause = f" AND COALESCE(s.consol_days, 0) >= {int(min_consol)}" if min_consol > 0 else ""
+
         query = f"""
             SELECT s.*, mc.regime, mc.regime_multiplier AS mc_rm,
                    {score_expr} AS _filter_score
@@ -452,6 +466,7 @@ class Backtester:
               AND {score_expr} >= ?
               {max_score_clause}
               {regime_clause}
+              {consol_clause}
             ORDER BY s.scan_date ASC, {score_expr} DESC
         """
         with sqlite3.connect(DB_PATH) as conn:
@@ -590,6 +605,11 @@ class Backtester:
         if lo <= pos.current_stop:
             # gap-down: if open is already below stop, fill is at open
             fill = pos.current_stop if op >= pos.current_stop else op
+            # cap catastrophic gap fills — binary events on high-ADR stocks can produce
+            # -20R+ losses in a single bar; cap at max_loss_r to reflect real risk mgmt
+            if p.max_loss_r and risk_per_share > 0:
+                worst_fill = t.entry_price - p.max_loss_r * risk_per_share
+                fill = max(fill, worst_fill)
             t.exit_date   = ds
             t.exit_price  = fill
             t.exit_shares = pos.shares_remaining
@@ -783,10 +803,11 @@ class Backtester:
                 shares = max(1, math.floor(
                     current_equity * p.risk_per_trade / risk_per_share
                 ))
-                # single-position cap
-                max_shares = max(1, math.floor(
-                    current_equity * p.max_position_pct / entry_price
-                ))
+                # single-position cap — do NOT use max(1,...): if 1 share costs more
+                # than max_position_pct of equity, skip entirely (HOLO-type spike stocks)
+                max_shares = math.floor(current_equity * p.max_position_pct / entry_price)
+                if max_shares < 1:
+                    continue
                 shares = min(shares, max_shares)
                 cost   = shares * entry_price
                 if cost > cash:
@@ -829,7 +850,9 @@ class Backtester:
         for pos in open_positions:
             t = pos.trade
             sym_rows = price_rows.get(t.symbol, {})
-            last_ds  = max(sym_rows.keys()) if sym_rows else ""
+            # cap to simulation end_date so eod exits don't use post-period pickle data
+            eligible = [d for d in sym_rows if d <= p.end_date]
+            last_ds  = max(eligible) if eligible else ""
             if last_ds:
                 last_row = sym_rows[last_ds]
                 cl = float(last_row["close"])
@@ -997,6 +1020,9 @@ class SignalValidator:
         if p.max_score is not None:
             max_score_clause = f" AND {score_expr} <= ?"
             max_score_params = [p.max_score]
+        min_consol = p.min_consol_days if p.min_consol_days is not None else 0
+        consol_clause = f" AND COALESCE(s.consol_days, 0) >= {int(min_consol)}" if min_consol > 0 else ""
+
         # signal validator uses signal_min_score (lower threshold for full distribution)
         query = f"""
             SELECT s.*, mc.regime,
@@ -1008,6 +1034,7 @@ class SignalValidator:
               AND {score_expr} >= ?
               {max_score_clause}
               {regime_clause}
+              {consol_clause}
             ORDER BY s.scan_date ASC, {score_expr} DESC
         """
         with sqlite3.connect(DB_PATH) as conn:
@@ -1319,9 +1346,13 @@ if __name__ == "__main__":
         help="fraction of equity risked per trade (Qullamaggie uses 0.003-0.005)")
     parser.add_argument("--equity",     type=float, default=100_000.0)
     parser.add_argument(
-        "--min-regime", default="",
+        "--min-regime", default="CAUTION",
         choices=["", "DOWNTREND", "CAUTION", "MIXED", "UPTREND", "BULL"],
     )
+    parser.add_argument("--min-consol-days", type=int, default=5,
+        help="minimum consol_days required; 0 disables (includes pre-605 non-base records)")
+    parser.add_argument("--max-loss-r", type=float, default=5.0,
+        help="cap single-trade loss at N×R regardless of gap fill; 0 disables")
     parser.add_argument("--csv", metavar="FILE",
         help="save output to CSV (trade log for 'trade' mode, signal data for 'signal' mode)")
     parser.add_argument(
@@ -1351,7 +1382,9 @@ if __name__ == "__main__":
         max_positions    = args.positions,
         risk_per_trade   = args.risk,
         initial_equity   = args.equity,
-        min_regime       = args.min_regime,
+        min_regime        = args.min_regime,
+        min_consol_days   = args.min_consol_days,
+        max_loss_r        = args.max_loss_r or None,
     )
 
     if args.mode in ("signal", "both"):

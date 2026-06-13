@@ -152,14 +152,25 @@ class OutcomeTracker:
         low    = future_df["low"]
         n_days = len(future_df)
 
+        volume = future_df["volume"] if "volume" in future_df.columns else None
+
         # ── Breakout: close crosses above breakout level ──────────────────────
         breakout_triggered = False
         days_to_breakout: Optional[int] = None
+        breakout_day_rel_volume: Optional[float] = None
         if breakout_level and not pd.isna(breakout_level):
             mask = close >= breakout_level
             if mask.any():
                 breakout_triggered = True
-                days_to_breakout   = int(mask.to_numpy().argmax()) + 1
+                bo_idx = int(mask.to_numpy().argmax())
+                days_to_breakout = bo_idx + 1
+                # record volume expansion on breakout day vs 20-day rolling average
+                # high-conviction breakouts show 150-200%+ of average volume
+                if volume is not None:
+                    avg_vol_20 = float(volume.rolling(20).mean().iloc[bo_idx])
+                    bo_vol = float(volume.iloc[bo_idx])
+                    if avg_vol_20 > 0:
+                        breakout_day_rel_volume = bo_vol / avg_vol_20
 
         # ── Stop: intraday low touches or undercuts stop level ────────────────
         stop_triggered = False
@@ -202,10 +213,11 @@ class OutcomeTracker:
             "target_reached":     int(target_reached),
             "days_to_breakout":   days_to_breakout,
             "days_to_stop":       days_to_stop,
-            "max_gain_10d":       max_gain(10),
-            "max_gain_20d":       max_gain(20),
-            "max_gain_60d":       max_gain(60),
-            "max_drawdown_20d":   max_drawdown(20),
+            "max_gain_10d":            max_gain(10),
+            "max_gain_20d":            max_gain(20),
+            "max_gain_60d":            max_gain(60),
+            "max_drawdown_20d":        max_drawdown(20),
+            "breakout_day_rel_volume": breakout_day_rel_volume,
         }
 
 

@@ -268,7 +268,7 @@ def _signal(score: float, min_alert: float = 80, min_watch: float = 70) -> str:
     return "PASS"
 
 
-def _build_scan_record(date_str: str, symbol: str, row: pd.Series, breakdown, config: dict) -> dict:
+def _build_scan_record(date_str: str, symbol: str, row: pd.Series, breakdown, config: dict, passes: bool) -> dict:
     consol_range = _safe_float(row.get("consol_range_60"))
     if consol_range is None:
         consol_range = _safe_float(row.get("consol_range_15"))
@@ -276,7 +276,7 @@ def _build_scan_record(date_str: str, symbol: str, row: pd.Series, breakdown, co
     return {
         "scan_date":               date_str,
         "symbol":                  symbol,
-        "passes_filters":          1,
+        "passes_filters":          int(bool(passes)),
         "score":                   float(breakdown.total),
         "raw_score":               float(breakdown.raw_total),
         "grade":                   _grade(breakdown.raw_total),
@@ -384,9 +384,10 @@ def _compute_outcome(
 
 
 def _existing_scan_dates(db_path: str, symbol: str) -> set[str]:
+    # check ALL records (passing + failing) so re-runs don't re-score already-processed dates
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT scan_date FROM scans WHERE symbol = ? AND passes_filters = 1",
+            "SELECT scan_date FROM scans WHERE symbol = ?",
             (symbol,),
         ).fetchall()
     return {r[0] for r in rows}
@@ -452,6 +453,7 @@ def _score_symbol(
     scoring: Scoring,
     db_path: str,
     config: dict,
+    force_rescore: bool = False,
 ) -> tuple[int, int]:
     pkl_path = HISTORY_DIR / f"{symbol}-full.pkl"
     if not pkl_path.exists():
@@ -463,7 +465,8 @@ def _score_symbol(
     if len(df) < 100:
         return 0, 0
 
-    existing = _existing_scan_dates(db_path, symbol)
+    # force_rescore ignores existing records so failing rows get backfilled on re-runs
+    existing = set() if force_rescore else _existing_scan_dates(db_path, symbol)
     feature_df = features.add_all_features(df, compx_df)
 
     scan_window = feature_df.loc[
@@ -479,19 +482,22 @@ def _score_symbol(
             continue
 
         passes, _ = scoring.apply_hard_filters(row)
-        if not passes:
-            continue
 
+        # score every stock regardless of filter result — failing records are saved
+        # with passes_filters=0 so the optimizer can analyze filter boundary effects
         breakdown = scoring.calculate_total_score(row, rs_rank=None)
-        scan_records.append(_build_scan_record(date_str, symbol, row, breakdown, config))
+        scan_records.append(_build_scan_record(date_str, symbol, row, breakdown, config, passes))
 
-        entry_price = _safe_float(row.get("close"))
-        if entry_price:
-            idx = feature_df.index.get_loc(date)
-            # use raw OHLCV for outcome price checks — no feature columns needed
-            outcome = _compute_outcome(date_str, symbol, entry_price, row, df.iloc[idx + 1:])
-            if outcome:
-                outcome_records.append(outcome)
+        # outcomes use next-day open as entry price, not scan-day close.
+        # scan-day close is unknowable at signal time (scan runs after market close).
+        idx = feature_df.index.get_loc(date)
+        future_rows = df.iloc[idx + 1:]
+        if not future_rows.empty:
+            entry_price = _safe_float(future_rows.iloc[0]["open"])
+            if entry_price:
+                outcome = _compute_outcome(date_str, symbol, entry_price, row, future_rows)
+                if outcome:
+                    outcome_records.append(outcome)
 
     if scan_records or outcome_records:
         _write_records(db_path, scan_records, outcome_records)
@@ -507,6 +513,7 @@ def phase2_score(
     scan_end: pd.Timestamp,
     db_path: str,
     config: dict,
+    force_rescore: bool = False,
 ):
     from ingestion import SchwabAPIClient
 
@@ -528,17 +535,26 @@ def phase2_score(
     available = {p.stem.split("-")[0] for p in HISTORY_DIR.glob("*-full.pkl")}
     to_score = [s for s in symbols if s in available]
 
+    trading_days = max(1, (scan_end - scan_start).days * 5 // 7)
+    estimated_rows = len(to_score) * trading_days
     print(f"  {len(to_score)} symbols to score")
+    print(f"  estimated records: ~{estimated_rows:,} (all stocks, passing + failing)")
+    print(f"  NOTE: failing stocks are now saved (passes_filters=0) for filter analysis.")
+    print(f"        DB may grow significantly. use --skip-scoring to skip if not needed.")
+    if force_rescore:
+        print(f"  force-rescore: ignoring existing records, re-processing all dates")
 
-    total_scans = 0
+    total_scans    = 0
     total_outcomes = 0
+    total_passing  = 0
 
     for i, symbol in enumerate(to_score, 1):
         try:
             n_scans, n_outcomes = _score_symbol(
-                symbol, compx_df, scan_start, scan_end, features, scoring, db_path, config
+                symbol, compx_df, scan_start, scan_end, features, scoring, db_path, config,
+                force_rescore=force_rescore,
             )
-            total_scans += n_scans
+            total_scans    += n_scans
             total_outcomes += n_outcomes
         except Exception:
             pass
@@ -555,57 +571,84 @@ def phase2_score(
 # ── phase 3: rs rank calibration ─────────────────────────────────────────────
 
 def phase3_rs_calibration(db_path: str, min_alert: float = 80, min_watch: float = 70):
-    print(f"\nphase 3 — rs rank calibration")
+    """
+    Compute cross-sectional RS percentile rank across the FULL downloaded universe
+    (passing + failing stocks) so the rank reflects genuine market leadership, not
+    just rank-within-the-already-filtered-set.
+
+    Thresholds match the live engine (engine.py score_relative_strength):
+      95th+  -> 8 pts  (very top is often distribution, not accumulation)
+      85-95th -> 10 pts (sweet spot: leaders before the crowd finds them)
+      75-85th ->  7 pts
+      65-75th ->  4 pts
+      <65th   ->  0 pts
+
+    Both passing and failing records get their relative_strength_score and
+    raw_score updated. The passes_filters column remains the source of truth
+    for which records the backtester and optimizer should trade.
+    """
+    print(f"\nphase 3 — rs rank calibration (full universe)")
 
     with sqlite3.connect(db_path) as conn:
         dates = [
             r[0]
             for r in conn.execute(
+                # calibrate on any date that has at least one filter-passing record
+                # so we don't waste time on dates with only non-tradeable stocks
                 "SELECT DISTINCT scan_date FROM scans WHERE passes_filters = 1 ORDER BY scan_date"
             ).fetchall()
         ]
 
-    print(f"  calibrating {len(dates)} scan dates...")
+    print(f"  calibrating {len(dates)} scan dates across full downloaded universe...")
     updated = 0
 
     for date_str in dates:
         with sqlite3.connect(db_path) as conn:
+            # query ALL records for this date — passing + failing — to build the universe
             rows = conn.execute(
-                """SELECT id, rs_comp_60, relative_strength_score, raw_score
+                """SELECT id, rs_comp_60, relative_strength_score, raw_score, passes_filters
                    FROM scans
-                   WHERE scan_date = ? AND passes_filters = 1 AND rs_comp_60 IS NOT NULL""",
+                   WHERE scan_date = ? AND rs_comp_60 IS NOT NULL""",
                 (date_str,),
             ).fetchall()
 
         if len(rows) < 2:
             continue
 
-        ids = [r[0] for r in rows]
-        rs_values = pd.Series([r[1] for r in rows], dtype=float)
-        rs_scores = np.array([r[2] for r in rows], dtype=float)
-        raw_scores = np.array([r[3] for r in rows], dtype=float)
+        ids           = [r[0] for r in rows]
+        rs_values     = pd.Series([r[1] for r in rows], dtype=float)
+        rs_scores     = np.array([r[2] for r in rows], dtype=float)
+        raw_scores    = np.array([r[3] for r in rows], dtype=float)
+        passes_flags  = [bool(r[4]) for r in rows]
 
-        # cross-sectional percentile (0-100) — ties get average rank
+        # rank against the full universe — a stock at the 90th percentile of
+        # 4,000 NASDAQ stocks means far more than 90th of 2 filter-passing stocks
         percentiles = rs_values.rank(pct=True, method="average") * 100
 
         updates = []
         for i, (row_id, pct) in enumerate(zip(ids, percentiles)):
-            if pct >= 90:
-                rank_pts = 10.0
-            elif pct >= 80:
-                rank_pts = 8.0
-            elif pct >= 70:
-                rank_pts = 6.0
-            elif pct >= 60:
-                rank_pts = 3.0
+            # mirror engine.py score_relative_strength exactly
+            if pct >= 95:
+                rank_pts = 8.0    # top bucket penalized: distribution risk at the pivot
+            elif pct >= 85:
+                rank_pts = 10.0   # sweet spot: leaders before the crowd finds them
+            elif pct >= 75:
+                rank_pts = 7.0
+            elif pct >= 65:
+                rank_pts = 4.0
             else:
                 rank_pts = 0.0
 
-            new_rs = rs_scores[i] + rank_pts
-            new_raw = raw_scores[i] + rank_pts
-            new_score = new_raw  # regime_multiplier = 1.0 for all historical records
+            new_rs    = rs_scores[i] + rank_pts
+            new_raw   = raw_scores[i] + rank_pts
+            new_score = new_raw   # regime_multiplier = 1.0 for all historical records
 
-            updates.append((new_rs, new_raw, new_score, _grade(new_raw), _signal(new_score, min_alert, min_watch), row_id))
+            updates.append((
+                new_rs, new_raw, new_score,
+                _grade(new_raw),
+                _signal(new_score, min_alert, min_watch),
+                row_id,
+            ))
 
         with sqlite3.connect(db_path) as conn:
             conn.executemany(
@@ -621,7 +664,7 @@ def phase3_rs_calibration(db_path: str, min_alert: float = 80, min_watch: float 
 
         updated += len(updates)
 
-    print(f"  updated {updated:,} records with cross-sectional rs rank")
+    print(f"  updated {updated:,} records with full-universe cross-sectional rs rank")
 
 
 # ── phase 4: backfill market conditions ──────────────────────────────────────
@@ -633,13 +676,13 @@ def phase4_backfill_market_conditions(db_path: str, config: dict):
     print("\nphase 4 — backfill market conditions")
 
     with sqlite3.connect(db_path) as conn:
-        dates = [r[0] for r in conn.execute("""
+        dates = [r[0].strip().rstrip("\\") for r in conn.execute("""
             SELECT DISTINCT s.scan_date
             FROM scans s
             LEFT JOIN market_conditions mc ON s.scan_date = mc.scan_date
             WHERE mc.scan_date IS NULL AND s.passes_filters = 1
             ORDER BY s.scan_date
-        """).fetchall()]
+        """).fetchall() if r[0]]
 
     # determine the full range needed: either missing dates or just today for refresh
     if dates:
@@ -760,6 +803,14 @@ def main():
     parser.add_argument("--skip-rs-calibration", action="store_true", help="skip phase 3")
     parser.add_argument("--skip-market-conditions", action="store_true", help="skip phase 4 (market conditions backfill)")
     parser.add_argument("--force-download", action="store_true", help="ignore .progress and re-download all")
+    parser.add_argument(
+        "--force-rescore", action="store_true",
+        help=(
+            "re-score all dates even if already in DB. use this when upgrading from a DB "
+            "that only has passes_filters=1 records and you want to backfill the failing "
+            "records for filter analysis. slower — clears and rewrites all scan/outcome rows."
+        ),
+    )
     args = parser.parse_args()
 
     config = PARAMETERS.copy()
@@ -789,7 +840,8 @@ def main():
         phase1_download(symbols, start_ts, end_ts, args.workers, args.delay, args.force_download)
 
     if not args.skip_scoring:
-        phase2_score(symbols, scan_start, scan_end, DB_PATH, config)
+        phase2_score(symbols, scan_start, scan_end, DB_PATH, config,
+                     force_rescore=args.force_rescore)
 
     if not args.skip_rs_calibration:
         phase3_rs_calibration(

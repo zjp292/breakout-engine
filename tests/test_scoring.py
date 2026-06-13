@@ -59,8 +59,9 @@ def make_row(**overrides) -> pd.Series:
         "ema10_surf_ratio": 0.80,       # 80% of recent days hugging the rising EMA
         # --- Stage 2 ---
         "stage2": True,
-        # --- 52-week proximity ---
+        # --- 52-week / 90-day proximity ---
         "pct_from_52wk_high": -0.05,    # 5% below high (near breakout)
+        "pct_from_90d_high":  -0.05,    # must match 52wk default so filter tests behave
         # --- Consolidation ---
         "consol_range_60": 0.04,        # 4% range — 60-day box
         "range_10": 0.04,               # 4% range — 10-day recent coil (used for tightness)
@@ -68,12 +69,20 @@ def make_row(**overrides) -> pd.Series:
         # --- VCP ---
         "vcp_contracting": True,
         "vcp_contraction_ratio": 0.30,
+        # vcp_contraction_count not set — scoring falls back to vcp_contracting flag (2.0 pts)
         # --- Wedge geometry ---
         "swing_low_count": 0,           # higher-lows pivot events in base window
         "swing_high_count": 0,          # lower-highs pivot events in base window
         # --- Prior move ---
-        "prior_move_pct": 0.30,         # 30% prior move
+        "prior_move_pct": 0.80,         # 80% prior move (passes 75% hard filter)
         "days_since_power_move": 20,
+        # --- Consolidation depth / breakout proximity ---
+        "base_depth": 0.10,             # 10% depth — below 25% penalty threshold
+        # breakout_level not set — pivot proximity defaults to 0 pts
+        # --- New signal features (all default to off so existing tests are unaffected) ---
+        "is_trigger_bar": False,        # trigger bar bonus: off by default
+        "obv_trend": False,             # OBV accumulation bonus: off by default
+        "weekly_aligned": True,         # weekly alignment: True = no penalty
         # --- Volume ---
         "dollar_volume": 50_000_000,    # $50M
         "volume_declining": True,
@@ -81,11 +90,13 @@ def make_row(**overrides) -> pd.Series:
         "adr_pct": 0.08,               # 8% ADR (above minimum)
         "relative_volume": 0.80,
         "volume_sma_20": 500_000,
+        "close_range_position": 0.50,   # mid-range close — demand bonus threshold is 0.70
         # --- Relative strength ---
-        "rs_comp_20": 0.06,
-        "rs_comp_60": 0.12,
+        "rs_comp_120": 0.15,
+        "rs_comp_60":  0.12,
         # --- Risk / reward ---
-        "stop_distance_pct": 0.08,     # 8% stop / 8% ADR = 1.0x — ideal
+        "stop_distance_pct":     0.08, # 8% stop / 8% ADR = 1.0x — ideal (backtester)
+        "stop_distance_20d_pct": 0.08, # 20-day stop (used by hard filter)
         "stop_level": 46.0,
         "potential_r": 3.5,
         "potential_gain_pct": 0.28,
@@ -98,40 +109,48 @@ def make_ideal_row() -> pd.Series:
     """
     Row engineered to achieve the maximum possible raw score of 100.
 
-    Component maxima (restructured 2026-05):
-      base_quality       6 + 4 + 4 + 6  = 20   (tightness+length+VCP+wedge)
-      trend_strength     5 + 5 + 4 + 6  = 20
-      relative_strength  8 + 12 + 10    = 30
-      volume_profile     6 + 14 + 10    = 30
+    Component maxima (2026-06: 52wk proximity removed as anti-predictive; base_length peak at 35-60d):
+      base_quality       6 + 4 + 4 + 6  = 20   (tightness+length+VCP+wedge; trigger capped at 20)
+      trend_strength     4 + 8          = 12   (MA+prior_move; stage2 removed 2026-06 as anti-predictive)
+      relative_strength  12 + 8 + 10    = 30   (60d primary 12pts, 120d secondary 8pts, rank 10pts)
+      volume_profile     6 + 14 + 10    = 30   (adr 12-15% required for 10pts; peak EV=0.429)
       risk_reward        0 (excluded from scoring)
-      TOTAL                             = 100
+
+    Normalization: (raw/sub_max)*weight
+      base:   (20/20)*10 = 10
+      trend:  (12/12)*15 = 15
+      rs:     (30/30)*25 = 25
+      volume: (30/30)*50 = 50
+      TOTAL               = 100
     """
     return make_row(
-        # base_quality -> 20
-        range_10=0.01,                 # tightness = 6 (recent 10-day range)
-        consol_range_60=0.01,          # fallback also tight
-        consol_days=10,                # length = 4
+        # base_quality -> 20 (6+4+4+6)
+        range_10=0.01,                    # tightness = 6 (ratio=0.01/0.15=0.067 ≤ 0.75)
+        consol_range_60=0.01,             # fallback also tight
+        consol_days=40,                   # length = 4 (optimal 35-60d window per DB)
+        vcp_contraction_count=3,          # vcp = 4 (3 contractions = full VCP)
         vcp_contracting=True,
-        vcp_contraction_ratio=0.20,    # vcp = 4
-        swing_low_count=3,             # wedge: hl >= 2
-        swing_high_count=3,            # wedge: lh >= 2 → wedge = 6
-        # trend_strength -> 20
-        stage2=True,                   # stage = 5
-        pct_from_52wk_high=-0.03,      # proximity = 5
+        vcp_contraction_ratio=0.20,
+        swing_low_count=3,                # wedge: hl >= 2
+        swing_high_count=3,               # wedge: lh >= 2 → wedge = 6
+        is_trigger_bar=False,             # trigger bar: capped at 20, no extra needed
+        # trend_strength -> 12 (4+8; stage2 removed 2026-06 as anti-predictive)
         ma_alignment=True,
         mas_rising=True,
         distance_from_sma10=0.02,
-        ema10_surf_ratio=0.80,         # surf_ratio >= 0.75 + aligned + rising = 4
-        prior_move_pct=0.50,
-        days_since_power_move=15,      # power_move = 6
-        # relative_strength -> 30 (rs_rank handled via score call)
-        rs_comp_20=0.15,               # rs_20 = 8
-        rs_comp_60=0.25,               # rs_60 = 12
-        # volume_profile -> 30
-        dollar_volume=150_000_000,     # dv = 6  (>= 10x min)
+        ema10_surf_ratio=0.80,            # surf_ratio >= 0.75 + aligned + rising = 4
+        prior_move_pct=2.5,
+        days_since_power_move=30,         # 200%+ within 60d → power_move = 8
+        weekly_aligned=True,              # no weekly penalty
+        # relative_strength -> 30 (rs_rank handled via score call; use rs_rank=90)
+        rs_comp_60=0.55,                  # rs_60 = 12 (>=0.50, primary signal 2026-06)
+        rs_comp_120=0.25,                 # rs_120 = 8 (>=0.20, secondary)
+        # volume_profile -> 30 (6+14+10)
+        dollar_volume=150_000_000,        # dv = 6  (>= 10x min)
         volume_declining=True,
-        volume_dryup_ratio=0.50,       # vd = 14 (< 0.60)
-        adr_pct=0.12,                  # adr = 10 (>= 10%)
+        volume_dryup_ratio=0.50,          # vd = 14 (< 0.60; OBV off by default)
+        adr_pct=0.13,                     # adr = 10 (12-15% peak, EV=0.429)
+        obv_trend=False,                  # OBV bonus off — base vd already 14
         # stop fields kept so the hard-filter still passes (used in filter tests)
         stop_distance_pct=0.06,
         potential_r=6.0,
@@ -154,28 +173,42 @@ class TestScoreBaseQuality:
 
     scoring = make_scoring()
 
-    # --- 1a. Tightness thresholds (uses range_10, max 6 pts) ---
+    # --- 1a. Tightness thresholds (ADR-relative: ratio = range_10 / adr_pct) ---
+    # thresholds: ≤0.75→6  ≤1.25→5  ≤2.0→4  ≤3.5→2  >3.5→0
 
-    @pytest.mark.parametrize("range_val, expected", [
-        (0.00,  6.0),  # extreme edge
-        (0.01,  6.0),  # < 2%
-        (0.02,  6.0),  # boundary: exactly 2%
-        (0.021, 5.0),  # just over 2%, within 3%
-        (0.03,  5.0),  # boundary: exactly 3%
-        (0.031, 4.0),  # just over 3%, within 5%
-        (0.05,  4.0),  # boundary: exactly 5%
-        (0.051, 2.0),  # just over 5%, within 8%
-        (0.08,  2.0),  # boundary: exactly 8%
-        (0.081, 0.0),  # just over 8% — too loose
-        (0.20,  0.0),  # very loose
-        (1.00,  0.0),  # default missing value fallback
+    @pytest.mark.parametrize("range_val, adr, expected", [
+        # ratio ≤ 0.75 → 6 pts
+        (0.00,  0.10, 6.0),   # ratio 0.0
+        (0.06,  0.10, 6.0),   # ratio 0.6
+        (0.075, 0.10, 6.0),   # ratio 0.75 — boundary
+        # ratio ≤ 1.25 → 5 pts
+        (0.076, 0.10, 5.0),   # ratio 0.76 — just over
+        (0.10,  0.10, 5.0),   # ratio 1.0
+        (0.125, 0.10, 5.0),   # ratio 1.25 — boundary
+        # ratio ≤ 2.0 → 4 pts
+        (0.126, 0.10, 4.0),   # ratio 1.26 — just over
+        (0.15,  0.10, 4.0),   # ratio 1.5
+        (0.20,  0.10, 4.0),   # ratio 2.0 — boundary
+        # ratio ≤ 3.5 → 2 pts
+        (0.201, 0.10, 2.0),   # ratio 2.01 — just over
+        (0.25,  0.10, 2.0),   # ratio 2.5
+        (0.35,  0.10, 2.0),   # ratio 3.5 — boundary
+        # ratio > 3.5 → 0 pts
+        (0.351, 0.10, 0.0),   # ratio 3.51 — just over
+        (0.50,  0.10, 0.0),   # ratio 5.0
+        (1.00,  0.10, 0.0),   # extreme
+        # verify it's truly ADR-relative (same ratio → same score, different absolutes)
+        (0.20,  0.04, 0.0),   # range 20%, adr 4%  → ratio 5.0  → 0
+        (0.20,  0.15, 4.0),   # range 20%, adr 15% → ratio 1.33 → 4
+        (0.20,  0.30, 6.0),   # range 20%, adr 30% → ratio 0.67 → 6
     ])
-    def test_tightness(self, range_val, expected):
-        row = make_row(range_10=range_val, consol_days=10,
+    def test_tightness(self, range_val, adr, expected):
+        row = make_row(range_10=range_val, adr_pct=adr, consol_days=10,
                        vcp_contracting=False, vcp_contraction_ratio=1.0)
         score, details = self.scoring.score_base_quality(row)
         assert details["tightness"] == expected, (
-            f"range_10={range_val} -> expected tightness {expected}, got {details['tightness']}"
+            f"range_10={range_val}, adr={adr} (ratio={range_val/adr:.2f})"
+            f" -> expected tightness {expected}, got {details['tightness']}"
         )
 
     def test_tightness_falls_back_to_consol_range_when_range_10_missing(self):
@@ -190,20 +223,20 @@ class TestScoreBaseQuality:
     # --- 1b. Base length thresholds (max 4 pts) ---
 
     @pytest.mark.parametrize("days, expected", [
-        (0,   0.0),   # < 3 — no base
-        (2,   0.0),   # < 3
-        (3,   2.0),   # micro-flag lower bound
-        (4,   2.0),   # micro-flag
-        (5,   4.0),   # sweet-spot lower bound
-        (10,  4.0),   # sweet-spot middle
-        (15,  4.0),   # sweet-spot upper boundary
-        (16,  3.5),   # classic VCP
-        (30,  3.5),   # classic VCP upper boundary
-        (31,  3.0),   # longer VCP
-        (45,  3.0),   # longer VCP upper boundary
-        (46,  1.5),   # extended
-        (60,  1.5),   # extended upper boundary
-        (61,  1.0),   # too long
+        # DB-validated: 35-60d best (+30.6% mean), 20-35d very good (+27.5%),
+        # short flags underperform longer bases; >60d stalls (+5.6%)
+        (0,   0.0),   # no base
+        (4,   0.0),   # below hard-filter minimum
+        (5,   2.5),   # short flag minimum
+        (9,   2.5),   # short flag
+        (10,  3.0),   # normal flag lower bound
+        (19,  3.0),   # normal flag
+        (20,  3.5),   # very good lower bound
+        (34,  3.5),   # very good upper bound
+        (35,  4.0),   # optimal lower bound (DB best)
+        (50,  4.0),   # optimal middle
+        (60,  4.0),   # optimal upper bound
+        (61,  1.0),   # too long — stalls
         (90,  1.0),   # way too long
     ])
     def test_base_length(self, days, expected):
@@ -214,28 +247,47 @@ class TestScoreBaseQuality:
             f"consol_days={days} -> expected length {expected}, got {details['base_length']}"
         )
 
-    # --- 1c. VCP contraction thresholds (max 4 pts) ---
+    # --- 1c. VCP contraction — count-based scoring (max 4 pts) ---
+    # count = consecutive non-overlapping windows each narrower than the one before.
+    # 3+ contractions = textbook VCP; 2 = solid; 1 = early; 0 = none detected.
+    # fallback when count not provided: vcp_contracting flag (2 pts) or ratio (0.5 pts).
 
-    @pytest.mark.parametrize("contracting, ratio, expected", [
-        (True,  0.10, 4.0),   # very strong (ratio <= 0.25)
-        (True,  0.25, 4.0),   # boundary
-        (True,  0.26, 3.0),   # just over 0.25
-        (True,  0.40, 3.0),   # boundary (<= 0.40)
-        (True,  0.41, 2.0),   # contracting but modest
-        (True,  0.80, 2.0),   # contracting, high ratio
-        (True,  0.99, 2.0),   # contracting, ratio close to 1
-        (False, 0.50, 0.5),   # not contracting, partial contraction
-        (False, 0.60, 0.5),   # boundary (<= 0.60)
-        (False, 0.61, 0.0),   # flat or expanding
-        (False, 1.00, 0.0),   # flat
+    @pytest.mark.parametrize("count, expected", [
+        (3, 4.0),   # 3 contractions: full textbook VCP
+        (4, 4.0),   # >3 also capped at 4.0
+        (2, 3.0),   # 2 contractions: solid VCP
+        (1, 2.0),   # 1 contraction: early VCP
+        (0, 0.0),   # count available but 0 contractions
     ])
-    def test_vcp_contraction(self, contracting, ratio, expected):
+    def test_vcp_contraction_count(self, count, expected):
         row = make_row(consol_days=10,
-                       vcp_contracting=contracting, vcp_contraction_ratio=ratio)
+                       vcp_contraction_count=count, vcp_contracting=False)
         score, details = self.scoring.score_base_quality(row)
         assert details["vcp_contraction"] == expected, (
-            f"contracting={contracting}, ratio={ratio} -> expected vcp {expected}, got {details['vcp_contraction']}"
+            f"count={count} -> expected {expected}, got {details['vcp_contraction']}"
         )
+
+    def test_vcp_contracting_flag_fallback(self):
+        """When count not provided (absent from row), fall back to vcp_contracting flag → 2 pts."""
+        row = make_row(consol_days=10, vcp_contracting=True)
+        # drop count so fallback fires
+        row = row.drop("vcp_contraction_count") if "vcp_contraction_count" in row.index else row
+        score, details = self.scoring.score_base_quality(row)
+        assert details["vcp_contraction"] == 2.0
+
+    def test_vcp_ratio_fallback(self):
+        """When count not provided and vcp_contracting=False but ratio <= 0.60 → 0.5 pts."""
+        row = make_row(consol_days=10, vcp_contracting=False, vcp_contraction_ratio=0.50)
+        row = row.drop("vcp_contraction_count") if "vcp_contraction_count" in row.index else row
+        score, details = self.scoring.score_base_quality(row)
+        assert details["vcp_contraction"] == 0.5
+
+    def test_vcp_no_signal_fallback(self):
+        """count not provided, vcp_contracting=False, ratio=1.0 → 0 pts."""
+        row = make_row(consol_days=10, vcp_contracting=False, vcp_contraction_ratio=1.0)
+        row = row.drop("vcp_contraction_count") if "vcp_contraction_count" in row.index else row
+        score, details = self.scoring.score_base_quality(row)
+        assert details["vcp_contraction"] == 0.0
 
     # --- 1d. Wedge geometry thresholds (max 6 pts) ---
 
@@ -262,21 +314,51 @@ class TestScoreBaseQuality:
         )
 
     def test_max_score_is_20(self):
-        """Perfect base: tight recent range + sweet-spot length + strong VCP + full wedge."""
+        """Perfect base: tight recent range + optimal-length (35-60d) + 3-contraction VCP + full wedge."""
         row = make_row(
-            range_10=0.01, consol_days=10,
+            range_10=0.01, consol_days=40,       # 35-60d window → 4 pts (DB optimal)
+            vcp_contraction_count=3,              # count=3 → 4 pts
             vcp_contracting=True, vcp_contraction_ratio=0.20,
             swing_low_count=3, swing_high_count=3,
+            is_trigger_bar=False,                 # trigger capped at 20 anyway
         )
         score, _ = self.scoring.score_base_quality(row)
         assert score == 20.0
 
-    def test_min_score_is_0(self):
-        """Worst possible base: loose range, no days, no VCP, no wedge structure."""
+    def test_trigger_bar_bonus_caps_at_20(self):
+        """Trigger bar adds 1.5 pts but total is capped at 20 when base is already maxed."""
         row = make_row(
-            range_10=0.20, consol_range_60=0.20, consol_days=0,
+            range_10=0.01, consol_days=40,       # 35-60d → 4 pts
+            vcp_contraction_count=3,
+            swing_low_count=3, swing_high_count=3,
+            is_trigger_bar=True,
+        )
+        score, details = self.scoring.score_base_quality(row)
+        assert score == 20.0  # cap holds
+        assert details["trigger_bar"] == 1.5
+
+    def test_trigger_bar_adds_bonus_on_partial_base(self):
+        """Trigger bar adds 1.5 pts when base is not maxed."""
+        row = make_row(
+            range_10=0.04, consol_days=40,        # tightness=6, length=4 (35-60d optimal)
+            vcp_contraction_count=1,               # vcp = 2
+            swing_low_count=0, swing_high_count=0, # wedge = 0
+            is_trigger_bar=True,
+        )
+        score, details = self.scoring.score_base_quality(row)
+        # 6 + 4 + 2 + 0 + 1.5 = 13.5 (no cap triggered)
+        assert score == 13.5
+        assert details["trigger_bar"] == 1.5
+
+    def test_min_score_is_0(self):
+        """Worst possible base: range ratio > 3.5, no days, no VCP, no wedge."""
+        # range_10=0.50 / adr_pct=0.08 → ratio 6.25 > 3.5 → tightness 0
+        row = make_row(
+            range_10=0.50, consol_range_60=0.50, consol_days=0,
+            vcp_contraction_count=0,            # explicit 0 → no VCP score
             vcp_contracting=False, vcp_contraction_ratio=1.0,
             swing_low_count=0, swing_high_count=0,
+            is_trigger_bar=False,
         )
         score, _ = self.scoring.score_base_quality(row)
         assert score == 0.0
@@ -304,86 +386,19 @@ class TestScoreTrendStrength:
 
     scoring = make_scoring()
 
-    # --- 2a. Stage 2 ---
+    # --- 2a. Stage 2 (removed from scoring 2026-06) ---
+    # DB: stage2=True EV=0.195 vs stage2=False EV=0.276 (anti-predictive — full Stage 2
+    # stocks are extended; fresh breakout stocks outperform by 40%). Kept in details
+    # for persistence compatibility.
 
-    def test_stage2_full(self):
-        row = make_row(stage2=True)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 5.0
+    def test_stage2_detail_always_zero(self):
+        """Stage 2 is no longer scored; detail key must exist at 0.0."""
+        for s2 in [True, False]:
+            row = make_row(stage2=s2)
+            _, d = self.scoring.score_trend_strength(row)
+            assert d["stage2"] == 0.0, f"stage2={s2}: expected 0.0, got {d['stage2']}"
 
-    def test_stage2_price_above_both_long_smas(self):
-        """dist_150 > 0, dist_200 > 0, but stage2=False -> 3 pts."""
-        row = make_row(stage2=False, distance_from_sma150=0.05, distance_from_sma200=0.10)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 3.0
-
-    def test_stage2_above_200_only(self):
-        """dist_150 <= 0, dist_200 > 0 -> 1.5 pts."""
-        row = make_row(stage2=False, distance_from_sma150=-0.02, distance_from_sma200=0.05)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 1.5
-
-    def test_stage2_nan_150_with_dist200_positive(self):
-        """dist_150 is NaN but dist_200 > 0 -> 1.5 pts (second elif)."""
-        row = make_row(stage2=False, distance_from_sma150=np.nan, distance_from_sma200=0.05)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 1.5
-
-    def test_stage2_nan_150_ma_aligned(self):
-        """Insufficient history (dist_150=NaN, dist_200=NaN), but MAs aligned -> 2 pts."""
-        row = make_row(stage2=False,
-                       distance_from_sma150=np.nan, distance_from_sma200=np.nan,
-                       ma_alignment=True)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 2.0
-
-    def test_stage2_nan_150_not_aligned(self):
-        """Insufficient history and MAs not aligned -> 0 pts."""
-        row = make_row(stage2=False,
-                       distance_from_sma150=np.nan, distance_from_sma200=np.nan,
-                       ma_alignment=False)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 0.0
-
-    def test_stage2_below_both_long_smas(self):
-        """Below 150 and 200 SMA -> 0 pts."""
-        row = make_row(stage2=False,
-                       distance_from_sma150=-0.05, distance_from_sma200=-0.10)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 0.0
-
-    def test_stage2_above_150_below_200(self):
-        """dist_150 > 0 but dist_200 < 0 -> 0 pts."""
-        row = make_row(stage2=False,
-                       distance_from_sma150=0.05, distance_from_sma200=-0.03)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["stage2"] == 0.0
-
-    # --- 2b. 52-week high proximity ---
-
-    @pytest.mark.parametrize("pct_from_high, expected", [
-        ( 0.00, 5.0),   # at the 52wk high
-        (-0.03, 5.0),   # within 5%
-        (-0.05, 5.0),   # boundary: exactly -5%
-        (-0.06, 4.5),   # just below -5%, within -10%
-        (-0.10, 4.5),   # boundary: exactly -10%
-        (-0.11, 3.0),   # within -15%
-        (-0.15, 3.0),   # boundary: exactly -15%
-        (-0.16, 2.0),   # within -20%
-        (-0.20, 2.0),   # boundary: exactly -20%
-        (-0.21, 1.0),   # within -25%
-        (-0.25, 1.0),   # boundary: exactly -25%
-        (-0.26, 0.0),   # >25% below
-        (-0.50, 0.0),   # far below
-    ])
-    def test_proximity_to_52wk_high(self, pct_from_high, expected):
-        row = make_row(pct_from_52wk_high=pct_from_high)
-        _, d = self.scoring.score_trend_strength(row)
-        assert d["proximity_to_high"] == expected, (
-            f"pct_from_high={pct_from_high} -> expected {expected}, got {d['proximity_to_high']}"
-        )
-
-    # --- 2c. Short-term MA structure ---
+    # --- 2b. Short-term MA structure ---
     # surf_ratio = ema10_surf_ratio: rolling fraction of days price hugged the rising EMA.
     # replaces the old single-day "above_10sma" binary — surf_ratio is the differentiator.
 
@@ -416,16 +431,26 @@ class TestScoreTrendStrength:
     # --- 2d. Prior power move ---
 
     @pytest.mark.parametrize("prior_move, days_since, expected", [
-        (0.40, 30,  6.0),   # 40%+ and within 30 days
-        (0.40, 31,  5.0),   # 40% but 31 days -> falls to 30%+ tier (<=45d)
-        (0.50, 30,  6.0),   # 50%+ within 30 days
-        (0.30, 45,  5.0),   # 30%+ within 45 days
-        (0.30, 46,  4.0),   # 30% but 46 days -> falls to 20%+ tier (<=60d)
-        (0.20, 60,  4.0),   # 20%+ within 60 days
-        (0.20, 61,  2.0),   # 20% but 61 days -> >= 15% tier (no day limit)
-        (0.15, 999, 2.0),   # 15%+ modest (no recency requirement)
-        (0.14, 999, 0.0),   # below 15% — no meaningful prior move
-        (0.00, 999, 0.0),   # no move
+        # 200%+ flagpole within 60d → 8 pts
+        (2.5,  30, 8.0),
+        (2.0,  60, 8.0),   # exactly 200%
+        (2.0,  61, 4.0),   # 200% but >60d → falls to 75%+ within 90d tier
+        # 100-200% within 60d → 7 pts; >60d falls to 75%+ tier (4 pts)
+        (1.5,  45, 7.0),
+        (1.0,  60, 7.0),   # exactly 100%
+        (1.0,  61, 4.0),   # 100% but >60d → falls to 75%+ within 90d tier
+        # 75-100% within 60d → 5.5 pts
+        (0.90, 30, 5.5),
+        (0.75, 60, 5.5),   # exactly 75%
+        (0.75, 61, 4.0),   # 75% but >60d → falls to 75%+ within 90d tier
+        (0.75, 90, 4.0),   # exactly 75% within 90d boundary
+        (0.75, 91, 0.0),   # 75% but >90d → 0 pts
+        # below 75% → 0 pts (blocked by hard filter; min_prior_move_pct=0.75)
+        (0.74, 30, 0.0),
+        (0.50, 60, 0.0),
+        (0.30, 60, 0.0),
+        (0.20, 60, 0.0),
+        (0.00, 999, 0.0),
     ])
     def test_prior_power_move(self, prior_move, days_since, expected):
         row = make_row(prior_move_pct=prior_move, days_since_power_move=days_since)
@@ -434,29 +459,58 @@ class TestScoreTrendStrength:
             f"prior_move={prior_move}, days={days_since} -> expected {expected}, got {d['prior_power_move']}"
         )
 
-    def test_max_score_is_20(self):
-        """Ideal trend: Stage 2, within 5% of high, perfect MAs, 50% move."""
+    def test_max_score_is_12(self):
+        """Ideal trend: perfect MAs + 200%+ flagpole. sub-max=12 (4+8; stage2 removed 2026-06)."""
         row = make_row(
-            stage2=True,
-            pct_from_52wk_high=-0.03,
             ma_alignment=True, mas_rising=True, distance_from_sma10=0.02,
-            prior_move_pct=0.50, days_since_power_move=15,
+            ema10_surf_ratio=0.80,
+            prior_move_pct=2.5, days_since_power_move=30,  # 200%+ → 8 pts
+            weekly_aligned=True,
         )
         score, _ = self.scoring.score_trend_strength(row)
-        assert score == 20.0
+        assert score == 12.0
+
+    def test_trend_score_75pct_move(self):
+        """75% prior move within 60d → 5.5 pts. MA+prior = 4+5.5 = 9.5."""
+        row = make_row(
+            ma_alignment=True, mas_rising=True, ema10_surf_ratio=0.80,
+            prior_move_pct=0.75, days_since_power_move=15,
+            weekly_aligned=True,
+        )
+        score, _ = self.scoring.score_trend_strength(row)
+        assert score == 9.5
 
     def test_min_score_is_0(self):
-        """Worst trend: below all MAs, far from high, no prior move."""
+        """Worst trend: below all MAs, no prior move."""
         row = make_row(
             stage2=False,
             distance_from_sma150=-0.10, distance_from_sma200=-0.15,
-            pct_from_52wk_high=-0.60,
             ma_alignment=False, mas_rising=False,
-            sma_10=45.0, sma_20=46.0,   # sma10 < sma20 -> no partial credit
+            sma_10=45.0, sma_20=46.0,     # sma10 < sma20 → no partial credit
             prior_move_pct=0.05, days_since_power_move=999,
+            weekly_aligned=True,           # no weekly penalty
         )
         score, _ = self.scoring.score_trend_strength(row)
         assert score == 0.0
+
+    # --- 2d. Weekly alignment soft penalty ---
+
+    def test_weekly_aligned_no_penalty(self):
+        row = make_row(weekly_aligned=True, stage2=True,
+                       prior_move_pct=0.50, days_since_power_move=15)
+        _, d = self.scoring.score_trend_strength(row)
+        assert d["weekly_alignment"] == 0.0
+
+    def test_weekly_misaligned_penalty(self):
+        row = make_row(weekly_aligned=False, stage2=True,
+                       prior_move_pct=0.50, days_since_power_move=15)
+        score_aligned, _ = self.scoring.score_trend_strength(
+            make_row(weekly_aligned=True, stage2=True,
+                     prior_move_pct=0.50, days_since_power_move=15)
+        )
+        score_misaligned, d = self.scoring.score_trend_strength(row)
+        assert d["weekly_alignment"] == -5.0
+        assert score_misaligned == max(0.0, score_aligned - 5.0)
 
 
 # ===========================================================================
@@ -466,86 +520,88 @@ class TestScoreTrendStrength:
 class TestScoreRelativeStrength:
     """
     score_relative_strength() decomposes into:
-      - 20-day RS  (0-8 pts)
-      - 60-day RS  (0-12 pts)
-      - RS rank    (0-10 pts, only when rs_rank supplied)
+      - 60-day RS   (0-12 pts)  — PRIMARY: DB EV=0.303 (Q4) vs EV=0.231 (Q1), monotonic
+      - 120-day RS  (0-8 pts)   — secondary, non-monotonic (Q3 is lowest EV=0.199)
+      - RS rank     (0-10 pts, only when rs_rank supplied)
     Max total = 30.
+
+    2026-06 swap: 60d → 12pts (primary), 120d → 8pts (secondary).
+    DB analysis (n=4662, prior>=75%): strong60d+weak120d EV=0.301 (best combo);
+    weak60d+strong120d EV=0.186 (worst). Prior weighting had these backwards.
     """
 
     scoring = make_scoring()
 
-    # --- 3a. 20-day RS thresholds ---
-
-    @pytest.mark.parametrize("rs_20, expected", [
-        ( 0.10, 8.0),   # +10%+ exceptional
-        ( 0.15, 8.0),   # above 10%
-        ( 0.05, 6.0),   # +5-10%
-        ( 0.10 - 1e-9, 6.0),  # just under 10%
-        ( 0.02, 4.0),   # +2-5%
-        ( 0.05 - 1e-9, 4.0),  # just under 5%
-        ( 0.00, 1.5),   # neutral
-        ( 0.02 - 1e-9, 1.5),  # just under 2%
-        (-0.01, 0.0),   # underperforming
-        (-0.20, 0.0),   # deeply underperforming
-    ])
-    def test_rs_20(self, rs_20, expected):
-        row = make_row(rs_comp_20=rs_20, rs_comp_60=0.0)
-        score, d = self.scoring.score_relative_strength(row, rs_rank=None)
-        assert d["rs_20_day"] == expected
-
-    # --- 3b. 60-day RS thresholds ---
+    # --- 3a. 60-day RS thresholds (now PRIMARY, 0-12 pts) ---
 
     @pytest.mark.parametrize("rs_60, expected", [
-        ( 0.20, 12.0),
-        ( 0.30, 12.0),
-        ( 0.15, 10.0),
-        ( 0.20 - 1e-9, 10.0),
-        ( 0.10, 8.0),
-        ( 0.15 - 1e-9, 8.0),
-        ( 0.05, 5.0),
-        ( 0.10 - 1e-9, 5.0),
-        ( 0.00, 1.5),
-        ( 0.05 - 1e-9, 1.5),
-        (-0.01, 0.0),
-        (-0.30, 0.0),
+        ( 0.50, 12.0),   # top quartile in filter-passing cohort (EV=0.303)
+        ( 0.80, 12.0),   # above 50%
+        ( 0.25,  9.0),   # 25-50%
+        ( 0.50 - 1e-9,  9.0),  # just under 50%
+        ( 0.12,  6.0),   # 12-25%
+        ( 0.25 - 1e-9,  6.0),
+        ( 0.00,  2.0),   # neutral (consolidating, not underperforming)
+        ( 0.12 - 1e-9,  2.0),
+        (-0.01,  0.0),   # underperforming benchmark
+        (-0.30,  0.0),
     ])
     def test_rs_60(self, rs_60, expected):
-        row = make_row(rs_comp_20=0.0, rs_comp_60=rs_60)
+        row = make_row(rs_comp_120=0.0, rs_comp_60=rs_60)
         score, d = self.scoring.score_relative_strength(row, rs_rank=None)
         assert d["rs_60_day"] == expected
+
+    # --- 3b. 120-day RS thresholds (secondary, 0-8 pts) ---
+
+    @pytest.mark.parametrize("rs_120, expected", [
+        ( 0.20,  8.0),   # positive trend over 4 months
+        ( 0.50,  8.0),   # above 20%
+        ( 0.10,  6.0),   # 10-20%
+        ( 0.20 - 1e-9,  6.0),
+        ( 0.04,  3.0),   # 4-10%
+        ( 0.10 - 1e-9,  3.0),
+        ( 0.00,  1.0),   # neutral 4-month trend
+        ( 0.04 - 1e-9,  1.0),
+        (-0.01,  0.0),   # underperforming
+        (-0.20,  0.0),
+    ])
+    def test_rs_120(self, rs_120, expected):
+        row = make_row(rs_comp_120=rs_120, rs_comp_60=0.0)
+        score, d = self.scoring.score_relative_strength(row, rs_rank=None)
+        assert d["rs_120_day"] == expected
 
     # --- 3c. RS rank percentile ---
 
     @pytest.mark.parametrize("rs_rank, expected", [
-        (90.0, 10.0),   # top 10%
-        (95.0, 10.0),
-        (80.0, 8.0),    # top 20%
-        (89.9, 8.0),
-        (70.0, 6.0),    # top 30%
-        (79.9, 6.0),
-        (60.0, 3.0),    # top 40%
-        (69.9, 3.0),
-        (59.9, 0.0),    # below 60th percentile
-        ( 0.0, 0.0),
+        ( 95.0,  8.0),   # top 5%: crowded names, capped below max
+        (100.0,  8.0),
+        ( 90.0, 10.0),   # 85-95th: leadership sweet spot (max)
+        ( 85.0, 10.0),
+        ( 84.9,  7.0),   # 75-85th
+        ( 75.0,  7.0),
+        ( 74.9,  4.0),   # 65-75th
+        ( 65.0,  4.0),
+        ( 64.9,  0.0),   # below 65th
+        (  0.0,  0.0),
     ])
     def test_rs_rank(self, rs_rank, expected):
-        row = make_row(rs_comp_20=0.0, rs_comp_60=0.0)
+        row = make_row(rs_comp_120=0.0, rs_comp_60=0.0)
         score, d = self.scoring.score_relative_strength(row, rs_rank=rs_rank)
         assert d["rs_rank"] == expected
 
     def test_rs_rank_none_gives_zero_rank_points(self):
         """When rs_rank is not provided, rank component = 0."""
-        row = make_row(rs_comp_20=0.0, rs_comp_60=0.0)
+        row = make_row(rs_comp_120=0.0, rs_comp_60=0.0)
         score, d = self.scoring.score_relative_strength(row, rs_rank=None)
         assert d["rs_rank"] == 0.0
 
     def test_max_score_is_30(self):
-        row = make_row(rs_comp_20=0.15, rs_comp_60=0.25)
-        score, _ = self.scoring.score_relative_strength(row, rs_rank=95.0)
+        row = make_row(rs_comp_120=0.25, rs_comp_60=0.50)  # 60d>=0.50=12pts, 120d>=0.20=8pts
+        score, _ = self.scoring.score_relative_strength(row, rs_rank=90.0)
         assert score == 30.0
 
     def test_min_score_is_0(self):
-        row = make_row(rs_comp_20=-0.20, rs_comp_60=-0.30)
+        row = make_row(rs_comp_120=-0.20, rs_comp_60=-0.30)
         score, _ = self.scoring.score_relative_strength(row, rs_rank=10.0)
         assert score == 0.0
 
@@ -613,16 +669,31 @@ class TestScoreVolumeProfile:
     # --- 4c. ADR % ---
 
     @pytest.mark.parametrize("adr_pct, expected", [
-        (0.10, 10.0),   # 10%+ high-octane
-        (0.15, 10.0),
-        (0.08,  8.0),   # 8%+
-        (0.10 - 1e-9, 8.0),
-        (0.06,  6.0),   # 6%+
-        (0.08 - 1e-9, 6.0),
-        (0.05,  3.0),   # at minimum (5%)
-        (0.06 - 1e-9, 3.0),
-        (0.049, 0.0),   # below minimum
-        (0.00,  0.0),
+        # peak 12-15%: DB EV=0.429 (prior>=75% cohort, n=257)
+        (0.12,  10.0),
+        (0.14,  10.0),
+        (0.15 - 1e-9, 10.0),  # just below 15% boundary
+        # 15-20%: EV=0.378 → 9 pts
+        (0.15,   9.0),
+        (0.20,   9.0),   # exactly at upper boundary → still 9 pts
+        # 20-25%: EV=0.222 → 5.5 pts
+        (0.21,   5.5),
+        (0.24,   5.5),
+        # >=25%: EV=0.055 (terrible) → 2 pts
+        (0.25,   2.0),
+        (0.30,   2.0),
+        # 10-12%: EV=0.331 → 7.5 pts
+        (0.10,   7.5),
+        (0.12 - 1e-9, 7.5),
+        # 8-10% → 5 pts
+        (0.08,   5.0),
+        (0.10 - 1e-9, 5.0),
+        # 7-8% → 2.5 pts (hard-filter minimum)
+        (0.07,   2.5),
+        (0.08 - 1e-9, 2.5),
+        # below 7% → 0 pts
+        (0.069,  0.0),
+        (0.00,   0.0),
     ])
     def test_adr(self, adr_pct, expected):
         row = make_row(dollar_volume=0, volume_declining=False, volume_dryup_ratio=1.0,
@@ -633,7 +704,7 @@ class TestScoreVolumeProfile:
     def test_max_score_is_30(self):
         row = make_row(dollar_volume=150_000_000,
                        volume_declining=True, volume_dryup_ratio=0.50,
-                       adr_pct=0.12)
+                       adr_pct=0.13)  # 12-15% = peak (10 pts, EV=0.429)
         score, _ = self.scoring.score_volume_profile(row)
         assert score == 30.0
 
@@ -653,6 +724,67 @@ class TestScoreVolumeProfile:
         assert "volume_contraction" not in base_details
         assert "volume_dryup" not in base_details
         assert "volume" not in " ".join(base_details.keys())
+
+    # --- 4d. Volume dry-up gating on consol_days ---
+
+    def test_volume_dryup_suppressed_when_not_in_base(self):
+        """consol_days=0 means not in a base: dry-up signal is suppressed entirely."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.50,
+                       consol_days=0)
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 0.0
+
+    def test_volume_dryup_active_when_in_base(self):
+        """consol_days=5 means in an active base: dry-up signal fires normally."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.50,
+                       consol_days=5)
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 14.0
+
+    # --- 4e. OBV accumulation bonus ---
+
+    def test_obv_trend_adds_bonus_when_vd_score_high(self):
+        """obv_trend=True with strong dry-up (vd_score >= 7) -> +2 pts.
+        use ratio=0.60 (vd_score=10.5) so the +2 bonus is visible below the 14-pt cap."""
+        row_base = make_row(dollar_volume=0, adr_pct=0.0,
+                            volume_declining=True, volume_dryup_ratio=0.60,
+                            obv_trend=False)
+        row_obv  = make_row(dollar_volume=0, adr_pct=0.0,
+                            volume_declining=True, volume_dryup_ratio=0.60,
+                            obv_trend=True)
+        _, d_base = self.scoring.score_volume_profile(row_base)
+        _, d_obv  = self.scoring.score_volume_profile(row_obv)
+        assert d_obv["volume_contraction"] == d_base["volume_contraction"] + 2.0
+
+    def test_obv_trend_adds_1pt_when_vd_score_low(self):
+        """obv_trend=True with weak dry-up (vd_score < 7) -> +1 pt."""
+        row_base = make_row(dollar_volume=0, adr_pct=0.0,
+                            volume_declining=False, volume_dryup_ratio=0.70,
+                            obv_trend=False)
+        row_obv  = make_row(dollar_volume=0, adr_pct=0.0,
+                            volume_declining=False, volume_dryup_ratio=0.70,
+                            obv_trend=True)
+        _, d_base = self.scoring.score_volume_profile(row_base)
+        _, d_obv  = self.scoring.score_volume_profile(row_obv)
+        assert d_obv["volume_contraction"] == d_base["volume_contraction"] + 1.0
+
+    def test_obv_bonus_does_not_exceed_14_cap(self):
+        """OBV bonus must not push vd_score above the 14-pt sub-component cap."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.50,
+                       obv_trend=True)
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] <= 14.0
+
+    def test_obv_false_does_not_change_score(self):
+        """obv_trend=False (default) leaves volume_contraction unchanged."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.60,
+                       obv_trend=False)
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 10.5
 
 
 # ===========================================================================
@@ -754,14 +886,17 @@ class TestApplyHardFilters:
     scoring = make_scoring()
 
     def _passing_row(self) -> pd.Series:
-        """Minimal row that satisfies all 6 hard filters."""
+        """Minimal row that satisfies all hard filters."""
         return make_row(
             close=10.0,
             sma_50=9.0,               # close > sma_50
             dollar_volume=15_000_000, # > $10M
-            adr_pct=0.06,             # > 5%
-            stop_distance_pct=0.06,   # 6% stop / 6% ADR = 1.0x (< 3x)
+            adr_pct=0.08,             # > 7% (min raised from 5% to 7% in 2026-06)
+            stop_distance_pct=0.08,   # 8% stop / 8% ADR = 1.0x (< 5x)
+            stop_distance_20d_pct=0.08,
             pct_from_52wk_high=-0.10, # within 30%
+            consol_days=5,            # meets new min_consol_days filter
+            prior_move_pct=0.80,      # > 75% (min raised to 75% in 2026-06)
         )
 
     def test_passing_row_has_no_failures(self):
@@ -830,14 +965,15 @@ class TestApplyHardFilters:
     # --- Filter 4: Minimum ADR ---
 
     @pytest.mark.parametrize("adr, should_pass", [
-        (0.050, True),    # exactly at minimum
-        (0.049, False),   # just below
+        (0.070, True),    # exactly at new minimum (raised from 5% to 7% in 2026-06)
+        (0.069, False),   # just below
         (0.100, True),
+        (0.050, False),   # old minimum now fails
     ])
     def test_filter_adr(self, adr, should_pass):
         row = self._passing_row()
         row["adr_pct"] = adr
-        row["stop_distance_pct"] = adr * 1.0  # 1x ADR
+        row["stop_distance_20d_pct"] = adr * 1.0  # 1x ADR — well within the 5x limit
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes == should_pass
         if not should_pass:
@@ -845,19 +981,19 @@ class TestApplyHardFilters:
 
     # --- Filter 5: Stop distance relative to ADR ---
 
-    def test_filter_stop_exactly_3x_adr_passes(self):
-        """stop = 3x ADR exactly: 0.15 > 0.15 is False -> passes."""
+    def test_filter_stop_exactly_5x_adr_passes(self):
+        """stop = 5x ADR exactly: 0.40 > 0.40 is False -> passes."""
         row = self._passing_row()
-        row["adr_pct"] = 0.05
-        row["stop_distance_pct"] = 0.15  # exactly 3.0x ADR
+        row["adr_pct"] = 0.08
+        row["stop_distance_20d_pct"] = 0.40  # exactly 5.0x ADR
         passes, failures = self.scoring.apply_hard_filters(row)
         assert not any("Stop distance" in f and "ADR" in f for f in failures)
 
-    def test_filter_stop_over_3x_adr_fails(self):
-        """stop = 3.01x ADR -> fails."""
+    def test_filter_stop_over_5x_adr_fails(self):
+        """stop = 5.01x ADR -> fails."""
         row = self._passing_row()
-        row["adr_pct"] = 0.05
-        row["stop_distance_pct"] = 0.151  # > 0.15 = 3x ADR
+        row["adr_pct"] = 0.08
+        row["stop_distance_20d_pct"] = 0.401  # > 0.40 = 5x ADR
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes is False
         assert any("Stop distance" in f for f in failures)
@@ -865,7 +1001,7 @@ class TestApplyHardFilters:
     def test_filter_stop_too_tight_fails(self):
         """stop < 0.001 is rejected as irrationally tight."""
         row = self._passing_row()
-        row["stop_distance_pct"] = 0.0005
+        row["stop_distance_20d_pct"] = 0.0005
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes is False
         assert any("too tight" in f for f in failures)
@@ -880,33 +1016,115 @@ class TestApplyHardFilters:
         (-1.00, False),
     ])
     def test_filter_52wk_high_proximity(self, pct_from_high, should_pass):
+        """both windows set to same value — tests the threshold directly."""
         row = self._passing_row()
         row["pct_from_52wk_high"] = pct_from_high
+        row["pct_from_90d_high"]  = pct_from_high
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes == should_pass
         if not should_pass:
-            assert any("52wk high" in f for f in failures)
+            assert any("high" in f for f in failures)
+
+    def test_filter_52wk_far_but_90d_near_passes(self):
+        """post-crash setup: 52wk high is pre-crash; 90d high is recent flagpole top."""
+        row = self._passing_row()
+        row["pct_from_52wk_high"] = -0.60
+        row["pct_from_90d_high"]  = -0.08
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes is True
+        assert not any("high" in f for f in failures)
+
+    def test_filter_both_windows_far_fails(self):
+        """genuine downtrend: both windows far below high -> fails."""
+        row = self._passing_row()
+        row["pct_from_52wk_high"] = -0.50
+        row["pct_from_90d_high"]  = -0.45
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes is False
+        assert any("high" in f for f in failures)
 
     def test_filter_52wk_nan_skipped(self):
-        """NaN pct_from_52wk_high should not trigger the filter."""
+        """NaN pct_from_52wk_high falls back to 90d — filter still evaluates."""
         row = self._passing_row()
         row["pct_from_52wk_high"] = np.nan
+        row["pct_from_90d_high"]  = -0.05
         passes, failures = self.scoring.apply_hard_filters(row)
-        assert not any("52wk high" in f for f in failures)
+        assert not any("high" in f for f in failures)
 
     def test_multiple_failures_all_reported(self):
         """When several filters fail, all failure reasons should be present."""
         row = make_row(
-            close=2.0,            # fails price
-            dollar_volume=100,    # fails dollar volume
-            sma_50=999.0,         # fails above-50-SMA
-            adr_pct=0.01,         # fails ADR
-            stop_distance_pct=1.0, # fails stop (> 3x ADR)
-            pct_from_52wk_high=-0.90,  # fails 52wk high
+            close=2.0,                   # fails price
+            dollar_volume=100,           # fails dollar volume
+            sma_50=999.0,                # fails above-50-SMA
+            adr_pct=0.01,                # fails ADR
+            stop_distance_20d_pct=1.0,   # fails stop (> 3x ADR)
+            pct_from_52wk_high=-0.90,    # fails 52wk/90d high
+            pct_from_90d_high=-0.90,     # both windows far below
         )
         passes, failures = self.scoring.apply_hard_filters(row)
         assert passes is False
         assert len(failures) >= 4
+
+    # --- Filter 7: Prior move minimum (flagpole requirement) ---
+
+    @pytest.mark.parametrize("prior_move, should_pass", [
+        # raised from 25% → 30% → 50% → 75% (2026-06): DB EV monotonically improves
+        # >=50% EV=0.203, >=75% EV=0.236, >=100% EV=0.262
+        (0.75, True),   # exactly at new minimum — passes
+        (1.00, True),   # solid flagpole
+        (2.00, True),   # large flagpole
+        (0.74, False),  # just below new minimum
+        (0.50, False),  # old threshold — now fails
+        (0.30, False),  # older threshold — fails
+        (0.10, False),  # no flagpole
+        (0.00, False),  # flat stock
+    ])
+    def test_filter_prior_move(self, prior_move, should_pass):
+        row = self._passing_row()
+        row["prior_move_pct"] = prior_move
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes == should_pass, (
+            f"prior_move={prior_move:.0%} expected pass={should_pass}, got {passes}"
+        )
+        if not should_pass:
+            assert any("Prior move" in f for f in failures)
+
+    def test_filter_prior_move_missing_treated_as_zero(self):
+        """Missing prior_move_pct defaults to 0.0, which fails the filter."""
+        row = self._passing_row()
+        row["prior_move_pct"] = None
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes is False
+        assert any("Prior move" in f for f in failures)
+
+    # --- Filter 8: Minimum consolidation days ---
+
+    @pytest.mark.parametrize("consol, should_pass", [
+        (5,  True),   # exactly at minimum
+        (10, True),   # healthy base
+        (30, True),   # long base
+        (4,  False),  # one day short
+        (1,  False),  # too short
+        (0,  False),  # not in a base at all — the most common DB state
+    ])
+    def test_filter_consol_days(self, consol, should_pass):
+        row = self._passing_row()
+        row["consol_days"] = consol
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes == should_pass, (
+            f"consol_days={consol} expected pass={should_pass}, got {passes}"
+        )
+        if not should_pass:
+            assert any("Consolidation" in f for f in failures)
+
+    def test_filter_consol_days_none_treated_as_zero(self):
+        """consol_days=None defaults to 0, which fails the filter."""
+        row = self._passing_row()
+        row["consol_days"] = None
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes is False
+        assert any("Consolidation" in f for f in failures)
 
 
 # ===========================================================================
@@ -975,36 +1193,47 @@ class TestCalculateTotalScore:
     def test_ideal_row_raw_score_100(self):
         scoring = make_scoring(regime_multiplier=1.0)
         row = make_ideal_row()
-        bd = scoring.calculate_total_score(row, rs_rank=95.0)
+        bd = scoring.calculate_total_score(row, rs_rank=90.0)
         assert bd.raw_total == 100.0, f"Expected 100, got {bd.raw_total}"
 
     def test_ideal_row_total_equals_raw_when_multiplier_is_1(self):
         scoring = make_scoring(regime_multiplier=1.0)
         row = make_ideal_row()
-        bd = scoring.calculate_total_score(row, rs_rank=95.0)
+        bd = scoring.calculate_total_score(row, rs_rank=90.0)
         assert bd.total == bd.raw_total
 
     def test_regime_multiplier_gates_total(self):
         """With multiplier=0.5, total should be half of raw_total."""
         scoring = make_scoring(regime_multiplier=0.5)
         row = make_ideal_row()
-        bd = scoring.calculate_total_score(row, rs_rank=95.0)
+        bd = scoring.calculate_total_score(row, rs_rank=90.0)
         assert bd.total == pytest.approx(bd.raw_total * 0.5)
 
     def test_regime_multiplier_075_applies_correctly(self):
         scoring = make_scoring(regime_multiplier=0.75)
         row = make_ideal_row()
-        bd = scoring.calculate_total_score(row, rs_rank=95.0)
+        bd = scoring.calculate_total_score(row, rs_rank=90.0)
         assert bd.total == pytest.approx(bd.raw_total * 0.75, rel=1e-6)
 
     def test_component_sum_equals_raw_total(self):
+        """
+        raw_total = sum of (raw_component / sub_max) * config_weight.
+        sub-component maxes (denominators): base=20, trend=17, rs=30, volume=30.
+        config weights differ (10/15/25/50), so simple sum != raw_total.
+        """
         scoring = make_scoring(regime_multiplier=1.0)
         row = make_ideal_row()
         bd = scoring.calculate_total_score(row, rs_rank=80.0)
-        # risk_reward is excluded from raw_total (always 0 in breakdown)
-        component_sum = (bd.base_quality + bd.trend_strength +
-                         bd.relative_strength + bd.volume_profile)
-        assert component_sum == pytest.approx(bd.raw_total, rel=1e-6)
+        weights = PARAMETERS["weights"]
+        _sub_maxes = {"base_quality": 20.0, "trend_strength": 12.0,
+                      "relative_strength": 30.0, "volume_profile": 30.0}
+        expected = (
+            bd.base_quality      / _sub_maxes["base_quality"]      * weights["base_quality"]
+            + bd.trend_strength  / _sub_maxes["trend_strength"]    * weights["trend_strength"]
+            + bd.relative_strength / _sub_maxes["relative_strength"] * weights["relative_strength"]
+            + bd.volume_profile  / _sub_maxes["volume_profile"]    * weights["volume_profile"]
+        )
+        assert bd.raw_total == pytest.approx(expected, rel=1e-6)
 
     def test_returns_score_breakdown_dataclass(self):
         scoring = make_scoring()
@@ -1039,7 +1268,7 @@ class TestCalculateTotalScore:
         on a worst-case row.
         """
         scoring = make_scoring(regime_multiplier=1.0)
-        ideal = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
+        ideal = scoring.calculate_total_score(make_ideal_row(), rs_rank=90.0)
         assert 0.0 <= ideal.raw_total <= 100.0
         assert 0.0 <= ideal.total <= 100.0
 
@@ -1048,7 +1277,7 @@ class TestCalculateTotalScore:
             stage2=False, distance_from_sma150=-0.50, distance_from_sma200=-0.50,
             pct_from_52wk_high=-0.99, ma_alignment=False, mas_rising=False,
             sma_10=40.0, sma_20=41.0, prior_move_pct=0.0, days_since_power_move=999,
-            rs_comp_20=-0.50, rs_comp_60=-0.50,
+            rs_comp_120=-0.50, rs_comp_60=-0.50,
             dollar_volume=0, volume_declining=False, volume_dryup_ratio=2.0, adr_pct=0.0,
             stop_distance_pct=0.50, potential_r=0.0,
             vcp_contracting=False, vcp_contraction_ratio=1.0,
@@ -1057,6 +1286,80 @@ class TestCalculateTotalScore:
         bad = scoring.calculate_total_score(worst, rs_rank=5.0)
         assert bad.raw_total == 0.0
         assert bad.total == 0.0
+
+
+# ===========================================================================
+# 9. EARNINGS PROXIMITY PENALTY
+# ===========================================================================
+
+class TestEarningsPenalty:
+    """
+    calculate_total_score() reduces raw_total when earnings are imminent.
+    days_to_earnings missing or None → no penalty (backward-compatible with
+    historical scoring rows that predate the earnings feature).
+    """
+
+    def _score_with_dte(self, days_to_earnings):
+        scoring = make_scoring(regime_multiplier=1.0)
+        row = make_ideal_row()
+        row = pd.Series({**row.to_dict(), "days_to_earnings": days_to_earnings})
+        return scoring.calculate_total_score(row, rs_rank=90.0)
+
+    def test_no_penalty_when_dte_missing(self):
+        """rows without days_to_earnings (historical data) get no penalty."""
+        scoring = make_scoring(regime_multiplier=1.0)
+        bd_no_dte = scoring.calculate_total_score(make_ideal_row(), rs_rank=90.0)
+        assert bd_no_dte.raw_total == 100.0
+
+    def test_no_penalty_when_dte_is_nan(self):
+        bd = self._score_with_dte(float("nan"))
+        assert bd.raw_total == 100.0
+
+    def test_no_penalty_when_dte_is_none(self):
+        bd = self._score_with_dte(None)
+        assert bd.raw_total == 100.0
+
+    def test_no_penalty_when_dte_15(self):
+        """15 days to earnings is beyond the penalty window."""
+        bd = self._score_with_dte(15)
+        assert bd.raw_total == 100.0
+
+    def test_five_pt_penalty_when_dte_10(self):
+        bd = self._score_with_dte(10)
+        assert bd.raw_total == pytest.approx(95.0)
+
+    def test_five_pt_penalty_when_dte_7(self):
+        bd = self._score_with_dte(7)
+        assert bd.raw_total == pytest.approx(95.0)
+
+    def test_ten_pt_penalty_when_dte_5(self):
+        bd = self._score_with_dte(5)
+        assert bd.raw_total == pytest.approx(90.0)
+
+    def test_ten_pt_penalty_when_dte_0(self):
+        """earnings today still triggers the hard penalty."""
+        bd = self._score_with_dte(0)
+        assert bd.raw_total == pytest.approx(90.0)
+
+    def test_no_penalty_when_dte_negative(self):
+        """past earnings (dte < 0) should NOT be penalized."""
+        bd = self._score_with_dte(-3)
+        assert bd.raw_total == 100.0
+
+    def test_penalty_floored_at_zero(self):
+        """a stock that scores near 0 + earnings penalty can't go negative."""
+        scoring = make_scoring(regime_multiplier=1.0)
+        row = make_row(
+            range_10=1.0, consol_days=0, stage2=False,
+            distance_from_sma150=-0.50, distance_from_sma200=-0.50,
+            pct_from_52wk_high=-0.99, ma_alignment=False, mas_rising=False,
+            prior_move_pct=0.0, days_since_power_move=999,
+            rs_comp_120=-0.50, rs_comp_60=-0.50,
+            dollar_volume=0, volume_declining=False, volume_dryup_ratio=2.0,
+            adr_pct=0.0, vcp_contracting=False, days_to_earnings=3,
+        )
+        bd = scoring.calculate_total_score(row)
+        assert bd.raw_total >= 0.0
 
 
 # ===========================================================================
@@ -1156,15 +1459,30 @@ class TestScoreDataframe:
                         scored_no_rank.iloc[i]["score_relative_strength"])
 
     def test_component_scores_sum_to_raw_score(self):
+        """
+        raw_score = sum of (component_raw / sub_max) * config_weight for each component.
+
+        config weights (20/15/20/45) differ from sub-component maxes (20/20/30/30);
+        the normalization step means raw sub-component scores don't simply add to raw_score.
+        """
         scoring = make_scoring()
         df = self._build_feature_df()
         scored = scoring.score_dataframe(df)
+        weights = PARAMETERS["weights"]
+        # actual max output of each scoring method (denominators in normalization)
+        _sub_maxes = {
+            "base_quality": 20.0, "trend_strength": 12.0,
+            "relative_strength": 30.0, "volume_profile": 30.0,
+        }
         for i in range(1, 5):
             if scored.iloc[i]["passes_filters"]:
                 row = scored.iloc[i]
-                # score_risk_reward is always 0 — excluded from raw_score (2026-05)
-                expected_raw = (row["score_base_quality"] + row["score_trend_strength"] +
-                                row["score_relative_strength"] + row["score_volume_profile"])
+                expected_raw = (
+                    row["score_base_quality"]      / _sub_maxes["base_quality"]      * weights["base_quality"]
+                    + row["score_trend_strength"]  / _sub_maxes["trend_strength"]    * weights["trend_strength"]
+                    + row["score_relative_strength"] / _sub_maxes["relative_strength"] * weights["relative_strength"]
+                    + row["score_volume_profile"]  / _sub_maxes["volume_profile"]    * weights["volume_profile"]
+                )
                 assert row["raw_score"] == pytest.approx(expected_raw, rel=1e-6)
 
 
@@ -1181,59 +1499,67 @@ class TestGoldenSnapshot:
 
     def test_ideal_setup_scores_100_raw(self):
         scoring = make_scoring(regime_multiplier=1.0)
-        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
+        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=90.0)
         assert bd.raw_total == 100.0
 
     def test_ideal_setup_in_downtrend_scores_50_total(self):
         """Severe downtrend: multiplier = 0.5 -> total halved."""
         scoring = make_scoring(regime_multiplier=0.5)
-        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
+        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=90.0)
         assert bd.total == pytest.approx(50.0)
 
     def test_ideal_setup_grade_is_A_plus(self):
         scoring = make_scoring(regime_multiplier=1.0)
-        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
+        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=90.0)
         assert scoring.get_grade(bd.raw_total) == "A+"
 
     def test_ideal_setup_signal_is_strong_buy(self):
         scoring = make_scoring(regime_multiplier=1.0)
-        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
+        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=90.0)
         assert scoring.get_signal_strength(bd.total) == "STRONG BUY - Alert"
 
     def test_ideal_setup_in_downtrend_signal_is_pass(self):
         """Multiplier=0.5 -> total=50 -> PASS (below 60 threshold)."""
         scoring = make_scoring(regime_multiplier=0.5)
-        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=95.0)
+        bd = scoring.calculate_total_score(make_ideal_row(), rs_rank=90.0)
         assert scoring.get_signal_strength(bd.total) == "PASS"
 
     def test_component_maxima(self):
-        """Verify each component achieves its documented maximum.
+        """
+        Verify each scoring method hits its documented raw sub-component max on an ideal row.
 
-        base_quality sub-components (2026-05): tightness(6)+length(4)+VCP(4)+wedge(6)=20
+        Sub-component maxes (denominators in calculate_total_score normalization):
+          base_quality:      6+4+4+6      = 20   (trigger bar capped at 20)
+          trend_strength:    4+8          = 12   (stage2 removed 2026-06: anti-predictive per DB)
+          relative_strength: 12+8+10      = 30
+          volume_profile:    6+14+10      = 30   (OBV bonus capped within vd 14)
+
+        Config weights (what each component contributes to raw_total):
+          base=10, trend=15, rs=25, volume=50
+          Normalization (raw/sub_max * weight) yields raw_total = 100 on ideal row.
         """
         scoring = make_scoring(regime_multiplier=1.0)
         row = make_ideal_row()
-        bd = scoring.calculate_total_score(row, rs_rank=95.0)
-        weights = PARAMETERS["weights"]
-        assert bd.base_quality == weights["base_quality"]           # 20
-        assert bd.trend_strength == weights["trend_strength"]       # 20
-        assert bd.relative_strength == weights["relative_strength"] # 30
-        assert bd.volume_profile == weights["volume_profile"]       # 30
-        assert bd.risk_reward == weights["risk_reward"]             # 0
+        bd = scoring.calculate_total_score(row, rs_rank=90.0)
+        assert bd.base_quality == 20.0
+        assert bd.trend_strength == 12.0
+        assert bd.relative_strength == 30.0
+        assert bd.volume_profile == 30.0
+        assert bd.risk_reward == 0.0
 
     def test_weight_totals_sum_to_100(self):
         """Documented weights must sum to 100 — the denominator of the scale."""
         weights = PARAMETERS["weights"]
         assert sum(weights.values()) == 100
 
-    def test_no_score_exceeds_category_weight(self):
-        """No single component can score above its weight maximum."""
+    def test_no_score_exceeds_sub_component_max(self):
+        """No scoring method output can exceed its documented sub-component max."""
         scoring = make_scoring(regime_multiplier=1.0)
         row = make_ideal_row()
-        bd = scoring.calculate_total_score(row, rs_rank=95.0)
-        weights = PARAMETERS["weights"]
-        assert bd.base_quality <= weights["base_quality"]
-        assert bd.trend_strength <= weights["trend_strength"]
-        assert bd.relative_strength <= weights["relative_strength"]
-        assert bd.volume_profile <= weights["volume_profile"]
-        assert bd.risk_reward <= weights["risk_reward"]
+        bd = scoring.calculate_total_score(row, rs_rank=90.0)
+        # sub-component maxes — the actual upper bound of each scoring method's output
+        assert bd.base_quality <= 20.0
+        assert bd.trend_strength <= 12.0
+        assert bd.relative_strength <= 30.0
+        assert bd.volume_profile <= 30.0
+        assert bd.risk_reward == 0.0

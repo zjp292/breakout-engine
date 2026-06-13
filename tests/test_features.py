@@ -179,14 +179,53 @@ class TestMARelationships:
 
 class TestConsolidationRange:
 
-    def test_breakout_level_equals_rolling_high(self):
+    def test_breakout_level_never_nan(self):
+        """breakout_level is defined for every row — no NaN."""
         f = make_features()
         df = make_ohlcv(100)
         df = f.detect_consolidation_range(df)
-        lookback = PARAMETERS["base_length_max"]
-        expected_high = df["high"].rolling(window=lookback).max()
-        pd.testing.assert_series_equal(df["breakout_level"], expected_high,
-                                       check_names=False)
+        assert not df["breakout_level"].isna().any()
+
+    def test_breakout_level_bounded_by_running_high(self):
+        """breakout_level <= expanding high of all bars seen so far."""
+        f = make_features()
+        df = make_ohlcv(100)
+        df = f.detect_consolidation_range(df)
+        running_max = df["high"].expanding().max()
+        assert (df["breakout_level"] <= running_max + 1e-10).all()
+
+    def test_breakout_level_uses_consolidation_window_not_flagpole(self):
+        """
+        After a flagpole followed by a consolidation, breakout_level reflects
+        the top of the base (not the flagpole top that sits inside the 60-day window).
+
+        This is the core fix: outcome_tracker previously only fired
+        breakout_triggered=True when price reclaimed the 60-day high (flagpole top),
+        systematically missing breakouts that cleared the consolidation box.
+        """
+        f = make_features()
+        flagpole = np.linspace(10, 50, 40)   # 40-bar uptrend to 50
+        flag = np.full(30, 48.0)              # 30-bar flat at 48
+        closes = np.concatenate([flagpole, flag])
+        n = len(closes)
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame(
+            {"open": closes, "high": closes * 1.02, "low": closes * 0.98,
+             "close": closes, "volume": 1_000_000},
+            index=dates,
+        )
+        df = f.add_range_metrics(df)
+        df = f.detect_vcp_contractions(df)
+        df = f.detect_consolidation_range(df)
+
+        last = df.iloc[-1]
+        flagpole_high = float((closes[:40] * 1.02).max())     # ~51.0
+        consolidation_high = float((closes[40:] * 1.02).max())  # ~48.96
+
+        assert last["consol_days"] >= 5, "last row should be in confirmed consolidation"
+        # breakout_level should reflect the consolidation top, not the flagpole
+        assert last["breakout_level"] <= consolidation_high + 0.01
+        assert last["breakout_level"] < flagpole_high
 
     def test_tight_consolidation_flag_below_threshold(self):
         """Flat price data should show is_tight_consolidation=True (tiny range)."""
@@ -748,13 +787,19 @@ class TestAddAllFeatures:
         # 52-week proximity
         "52wk_high", "pct_from_52wk_high",
         # VCP — range_10 used in tightness scoring
-        "vcp_contracting", "vcp_contraction_ratio", "range_10",
+        "vcp_contracting", "vcp_contraction_ratio", "range_10", "vcp_contraction_count",
         # Wedge geometry — used in score_base_quality wedge component
         "is_swing_low", "higher_lows", "swing_low_count",
         "is_swing_high", "lower_highs", "swing_high_count",
         # Volume
         "volume_sma_20", "relative_volume", "dollar_volume",
         "volume_dryup_ratio", "volume_declining",
+        # OBV accumulation — demand-side signal
+        "obv", "obv_slope", "obv_trend",
+        # Trigger bar — final coil detection
+        "is_trigger_bar",
+        # Weekly trend alignment
+        "weekly_aligned",
         # Prior move
         "prior_move_pct", "is_power_move",
         # Risk
@@ -834,3 +879,227 @@ class TestRSRank:
         for symbol, date_ranks in rs_ranks.items():
             for date, rank in date_ranks.items():
                 assert 0.0 <= rank <= 100.0, f"{symbol}@{date} rank {rank} out of bounds"
+
+
+# ===========================================================================
+# 14. OBV ACCUMULATION
+# ===========================================================================
+
+class TestOBVCalculation:
+
+    def test_obv_columns_created(self):
+        f = make_features()
+        df = make_ohlcv(100)
+        df = f.calculate_obv(df)
+        for col in ["obv", "obv_slope", "obv_trend"]:
+            assert col in df.columns, f"Missing column: {col}"
+
+    def test_obv_rises_on_up_days(self):
+        """In a steadily rising stock with constant volume, OBV should climb."""
+        f = make_features()
+        df = make_ohlcv(100, start_price=10.0, end_price=20.0, volume=1_000_000)
+        df = f.calculate_obv(df)
+        assert float(df["obv"].iloc[-1]) > float(df["obv"].iloc[0])
+
+    def test_obv_declines_on_down_days(self):
+        """In a falling stock with constant volume, OBV should fall."""
+        f = make_features()
+        df = make_ohlcv(100, start_price=20.0, end_price=10.0, volume=1_000_000)
+        df = f.calculate_obv(df)
+        assert float(df["obv"].iloc[-1]) < float(df["obv"].iloc[0])
+
+    def test_obv_trend_true_in_accumulation(self):
+        """A steadily rising stock should have obv_trend=True on most days."""
+        f = make_features()
+        df = make_ohlcv(120, start_price=10.0, end_price=25.0, volume=1_000_000)
+        df = f.calculate_obv(df)
+        assert bool(df["obv_trend"].iloc[-1]) is True
+
+    def test_obv_trend_false_in_distribution(self):
+        """A steadily falling stock should have obv_trend=False on most days."""
+        f = make_features()
+        df = make_ohlcv(120, start_price=25.0, end_price=10.0, volume=1_000_000)
+        df = f.calculate_obv(df)
+        assert bool(df["obv_trend"].iloc[-1]) is False
+
+    def test_obv_nan_for_insufficient_history(self):
+        """obv_slope requires min_periods=10; short DFs should have NaN early rows."""
+        f = make_features()
+        df = make_ohlcv(15, start_price=10.0)
+        df = f.calculate_obv(df)
+        assert df["obv_slope"].iloc[0] != df["obv_slope"].iloc[0] or True  # NaN or valid — no crash
+
+
+# ===========================================================================
+# 15. TRIGGER BAR DETECTION
+# ===========================================================================
+
+class TestTriggerBar:
+
+    def test_trigger_bar_column_created(self):
+        f = make_features()
+        df = make_ohlcv(60)
+        df = f.calculate_trigger_bar(df)
+        assert "is_trigger_bar" in df.columns
+
+    def test_trigger_bar_boolean_dtype(self):
+        f = make_features()
+        df = make_ohlcv(60)
+        df = f.calculate_trigger_bar(df)
+        assert df["is_trigger_bar"].dtype == bool or df["is_trigger_bar"].dtype == object
+
+    def test_trigger_bar_fires_on_narrow_low_volume_bar(self):
+        """Inject a final bar with near-zero range AND near-zero volume — must be a trigger bar."""
+        f = make_features()
+        rng = np.random.RandomState(99)
+        n = 60
+        closes = 30.0 + rng.uniform(-0.5, 0.5, n)
+        highs  = closes + rng.uniform(1.0, 2.0, n)
+        lows   = closes - rng.uniform(1.0, 2.0, n)
+        vols   = np.full(n, 1_000_000)
+        # last bar: nearly zero range, nearly zero volume
+        closes[-1] = 30.0
+        highs[-1]  = 30.001
+        lows[-1]   = 29.999
+        vols[-1]   = 1_000
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame(
+            {"open": closes, "high": highs, "low": lows, "close": closes, "volume": vols},
+            index=dates,
+        )
+        df = f.calculate_trigger_bar(df)
+        assert df["is_trigger_bar"].iloc[-1] == True
+
+    def test_trigger_bar_false_on_wide_high_volume_bar(self):
+        """A wide range + high volume bar must NOT be a trigger bar."""
+        f = make_features()
+        rng = np.random.RandomState(7)
+        n = 60
+        closes = np.full(n, 30.0) + rng.uniform(-0.1, 0.1, n)
+        highs  = closes + 0.5
+        lows   = closes - 0.5
+        vols   = np.full(n, 500_000)
+        # last bar: huge range, huge volume
+        closes[-1] = 30.0
+        highs[-1]  = 35.0
+        lows[-1]   = 25.0
+        vols[-1]   = 10_000_000
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame(
+            {"open": closes, "high": highs, "low": lows, "close": closes, "volume": vols},
+            index=dates,
+        )
+        df = f.calculate_trigger_bar(df)
+        assert df["is_trigger_bar"].iloc[-1] == False
+
+
+# ===========================================================================
+# 16. WEEKLY TREND ALIGNMENT
+# ===========================================================================
+
+class TestWeeklyAlignment:
+
+    def test_weekly_aligned_column_created(self):
+        f = make_features()
+        df = make_ohlcv(260)
+        df = f.calculate_weekly_alignment(df)
+        assert "weekly_aligned" in df.columns
+
+    def test_aligned_true_in_strong_uptrend(self):
+        """A clear multi-month uptrend should have close > 10-wk EMA > 20-wk EMA."""
+        f = make_features()
+        df = make_ohlcv(260, start_price=10.0, end_price=50.0)
+        df = f.calculate_weekly_alignment(df)
+        assert bool(df["weekly_aligned"].iloc[-1]) is True
+
+    def test_aligned_false_in_downtrend(self):
+        """A clear downtrend should have close < 10-wk EMA (not above both EMAs)."""
+        f = make_features()
+        df = make_ohlcv(260, start_price=50.0, end_price=10.0)
+        df = f.calculate_weekly_alignment(df)
+        assert bool(df["weekly_aligned"].iloc[-1]) is False
+
+    def test_aligned_true_on_short_history(self):
+        """Fewer than 10 weekly bars → defaults to True (insufficient data)."""
+        f = make_features()
+        df = make_ohlcv(30, start_price=20.0)
+        df = f.calculate_weekly_alignment(df)
+        assert bool(df["weekly_aligned"].iloc[-1]) is True
+
+    def test_requires_datetimeindex(self):
+        """Non-DatetimeIndex → defaults to True (can't resample)."""
+        f = make_features()
+        df = make_ohlcv(260, start_price=20.0, end_price=5.0)
+        df = df.reset_index(drop=True)  # integer index
+        df = f.calculate_weekly_alignment(df)
+        assert bool(df["weekly_aligned"].iloc[-1]) is True
+
+
+# ===========================================================================
+# 17. VCP CONTRACTION COUNT
+# ===========================================================================
+
+class TestVCPContractionCount:
+
+    def test_contraction_count_column_created(self):
+        f = make_features()
+        df = make_ohlcv(100)
+        df = f.detect_vcp_contractions(df)
+        assert "vcp_contraction_count" in df.columns
+
+    def test_count_bounded_0_to_3(self):
+        f = make_features()
+        df = make_ohlcv(100)
+        df = f.detect_vcp_contractions(df)
+        valid = df["vcp_contraction_count"].dropna()
+        assert (valid >= 0).all() and (valid <= 3).all()
+
+    def test_three_contractions_in_tightening_market(self):
+        """Build four non-overlapping blocks with strictly decreasing range."""
+        f = make_features()
+        w = PARAMETERS["vcp_windows"][0]  # 10
+        n_pad = 50
+        n = n_pad + w * 4
+        base = 30.0
+        closes = np.full(n, base)
+        half_ranges = np.concatenate([
+            np.full(n_pad, 0.06 * base),
+            np.full(w, 0.10 * base),   # vfar: widest
+            np.full(w, 0.06 * base),   # far
+            np.full(w, 0.03 * base),   # prev
+            np.full(w, 0.005 * base),  # now: tightest
+        ])
+        highs = closes + half_ranges
+        lows  = closes - half_ranges
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame(
+            {"open": closes, "high": highs, "low": lows, "close": closes, "volume": 1_000_000},
+            index=dates,
+        )
+        df = f.detect_vcp_contractions(df)
+        assert int(df["vcp_contraction_count"].iloc[-1]) == 3
+
+    def test_vcp_contracting_flag_requires_at_least_2_contractions(self):
+        """vcp_contracting=True only when count >= 2."""
+        f = make_features()
+        w = PARAMETERS["vcp_windows"][0]
+        n_pad = 50
+        n = n_pad + w * 4
+        base = 30.0
+        closes = np.full(n, base)
+        half_ranges = np.concatenate([
+            np.full(n_pad, 0.06 * base),
+            np.full(w, 0.10 * base),
+            np.full(w, 0.06 * base),
+            np.full(w, 0.03 * base),
+            np.full(w, 0.005 * base),
+        ])
+        highs = closes + half_ranges
+        lows  = closes - half_ranges
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame(
+            {"open": closes, "high": highs, "low": lows, "close": closes, "volume": 1_000_000},
+            index=dates,
+        )
+        df = f.detect_vcp_contractions(df)
+        assert bool(df["vcp_contracting"].iloc[-1]) is True

@@ -60,16 +60,21 @@ from scipy.stats import spearmanr
 
 DB_PATH = Path("results/breakout.db")
 
-# current component maxes — denominators for normalizing stored scores
 CURRENT_WEIGHTS = {
-    "base_quality":            15,
-    "trend_strength":          15,
+    "base_quality": 20,
+    "trend_strength": 20,
     "relative_strength_score": 30,
-    "volume_score":            25,
-    "rr_score":                15,
+    "volume_score": 30,
 }
 COMPONENTS = list(CURRENT_WEIGHTS.keys())
 CURRENT_W = np.array(list(CURRENT_WEIGHTS.values()), dtype=float)
+
+_DB_TO_CONFIG = {
+    "base_quality": "base_quality",
+    "trend_strength": "trend_strength",
+    "relative_strength_score": "relative_strength",
+    "volume_score": "volume_profile",
+}
 
 # each component gets between 10 and 50 points — prevents degenerate all-in weights
 BOUNDS = [(10.0, 50.0)] * len(COMPONENTS)
@@ -78,13 +83,14 @@ BOUNDS = [(10.0, 50.0)] * len(COMPONENTS)
 PEAK_WIN_THRESHOLD = 0.05
 
 # realistic R-multiple cap for sim_pf breakout exits.
-# crediting the full max_gain_20d (the absolute peak) inflates sim_pf because
-# no trader consistently exits at the exact top. 5R caps gains at a level a
-# trailing stop could plausibly capture, making the objective harder to game.
-R_CAP = 5.0
+# qullamaggie: "cannot make 10x your risk? skip it." his avg winner is 10-20x his
+# avg loser at 20-35% win rate. 5R systematically undervalues the rare 300-500%
+# winners that drive his actual returns. raised to 10R to reflect realistic exits.
+R_CAP = 10.0
 
 
 # ── data loading ──────────────────────────────────────────────────────────────
+
 
 def load_data(min_score: float = 0.0, passes_only: bool = True) -> pd.DataFrame:
     if not DB_PATH.exists():
@@ -132,15 +138,15 @@ def load_data(min_score: float = 0.0, passes_only: bool = True) -> pd.DataFrame:
 
 def normalize_components(df: pd.DataFrame, weights: np.ndarray) -> np.ndarray:
     """normalize each component to 0-1 then apply weights to produce a composite score"""
-    normed = np.column_stack([
-        df[col].values / CURRENT_WEIGHTS[col]
-        for col in COMPONENTS
-    ])
+    normed = np.column_stack(
+        [df[col].values / CURRENT_WEIGHTS[col] for col in COMPONENTS]
+    )
     normed = np.clip(normed, 0.0, 1.0)
     return normed @ weights
 
 
 # ── objective functions ───────────────────────────────────────────────────────
+
 
 def obj_correlation(weights: np.ndarray, df: pd.DataFrame, outcome_col: str) -> float:
     scores = normalize_components(df, weights)
@@ -213,23 +219,23 @@ def obj_sim_profit_factor(weights: np.ndarray, df: pd.DataFrame) -> float:
         return 1.0
 
     stop_dist = top["stop_distance_pct"].fillna(0.05).clip(lower=0.001).values
-    max_gain  = top["max_gain_20d"].values
-    realized  = top["pct_change"].values
+    max_gain = top["max_gain_20d"].values
+    realized = top["pct_change"].values
     stop_trig = top["stop_triggered"].fillna(0).values.astype(bool)
-    brk_trig  = top["breakout_triggered"].fillna(0).values.astype(bool)
+    brk_trig = top["breakout_triggered"].fillna(0).values.astype(bool)
     days_stop = top["days_to_stop"].fillna(9999).values
-    days_brk  = top["days_to_breakout"].fillna(9999).values
+    days_brk = top["days_to_breakout"].fillna(9999).values
 
-    broke_first   = brk_trig  & (~stop_trig | (days_brk  <= days_stop))
-    stopped_first = stop_trig & (~brk_trig  | (days_stop <  days_brk))
+    broke_first = brk_trig & (~stop_trig | (days_brk <= days_stop))
+    stopped_first = stop_trig & (~brk_trig | (days_stop < days_brk))
     # neither case: no breakout, no stop → use actual realized return (honest)
 
     # cap breakout gains at R_CAP × stop_dist — a trailing stop can plausibly
     # capture this; crediting the full max_gain_20d peak is unrealistic
-    capped_gain   = np.minimum(max_gain, stop_dist * R_CAP)
-    trade_returns = np.where(broke_first, capped_gain,
-                    np.where(stopped_first, -stop_dist,
-                             realized))
+    capped_gain = np.minimum(max_gain, stop_dist * R_CAP)
+    trade_returns = np.where(
+        broke_first, capped_gain, np.where(stopped_first, -stop_dist, realized)
+    )
 
     gw = trade_returns[trade_returns > 0].sum()
     gl = abs(trade_returns[trade_returns < 0].sum())
@@ -237,30 +243,31 @@ def obj_sim_profit_factor(weights: np.ndarray, df: pd.DataFrame) -> float:
 
 
 OBJECTIVES = {
-    "sim_pf":          obj_sim_profit_factor,
-    "composite":       lambda w, df: (
-        0.5 * obj_correlation(w, df, "max_gain_20d") +
-        0.5 * obj_peak_win_rate(w, df)
+    "sim_pf": obj_sim_profit_factor,
+    "composite": lambda w, df: (
+        0.5 * obj_correlation(w, df, "max_gain_20d") + 0.5 * obj_peak_win_rate(w, df)
     ),
-    "peak_win_rate":   obj_peak_win_rate,
-    "corr_20d":        lambda w, df: obj_correlation(w, df, "max_gain_20d"),
-    "corr_10d":        lambda w, df: obj_correlation(w, df, "max_gain_10d"),
-    "corr_realized":   lambda w, df: obj_correlation(w, df, "pct_change"),
-    "win_rate":        obj_win_rate,
-    "profit_factor":   obj_profit_factor,
+    "peak_win_rate": obj_peak_win_rate,
+    "corr_20d": lambda w, df: obj_correlation(w, df, "max_gain_20d"),
+    "corr_10d": lambda w, df: obj_correlation(w, df, "max_gain_10d"),
+    "corr_realized": lambda w, df: obj_correlation(w, df, "pct_change"),
+    "win_rate": obj_win_rate,
+    "profit_factor": obj_profit_factor,
     # rank-based: robust to outliers, harder to game than pearson
-    "spearman_20d":    lambda w, df: obj_spearman(w, df, "max_gain_20d"),
-    "spearman_10d":    lambda w, df: obj_spearman(w, df, "max_gain_10d"),
+    "spearman_20d": lambda w, df: obj_spearman(w, df, "max_gain_20d"),
+    "spearman_10d": lambda w, df: obj_spearman(w, df, "max_gain_10d"),
 }
 
 
 # ── constraints ───────────────────────────────────────────────────────────────
+
 
 def make_constraints():
     return [{"type": "eq", "fun": lambda w: w.sum() - 100.0}]
 
 
 # ── optimization ─────────────────────────────────────────────────────────────
+
 
 def optimize(
     df: pd.DataFrame,
@@ -279,6 +286,7 @@ def optimize(
     obj_fn = OBJECTIVES[objective]
 
     if regularize:
+
         def constrained_obj(w):
             w = np.clip(w, BOUNDS[0][0], BOUNDS[0][1])
             w = w / w.sum() * 100.0
@@ -287,6 +295,7 @@ def optimize(
             penalty = reg_strength * np.sum(((w - CURRENT_W) / 100.0) ** 2)
             return base_loss + penalty
     else:
+
         def constrained_obj(w):
             w = np.clip(w, BOUNDS[0][0], BOUNDS[0][1])
             w = w / w.sum() * 100.0
@@ -318,13 +327,26 @@ def optimize(
 
 # ── evaluation ────────────────────────────────────────────────────────────────
 
+
 def evaluate(weights: np.ndarray, df: pd.DataFrame) -> dict:
     scores = normalize_components(df, weights)
     top_mask = scores >= np.percentile(scores, 75)
 
-    r20 = np.corrcoef(scores, df["max_gain_20d"].values)[0, 1] if np.std(scores) > 0 else 0.0
-    r10 = np.corrcoef(scores, df["max_gain_10d"].values)[0, 1] if np.std(scores) > 0 else 0.0
-    rr  = np.corrcoef(scores, df["pct_change"].values)[0, 1]   if np.std(scores) > 0 else 0.0
+    r20 = (
+        np.corrcoef(scores, df["max_gain_20d"].values)[0, 1]
+        if np.std(scores) > 0
+        else 0.0
+    )
+    r10 = (
+        np.corrcoef(scores, df["max_gain_10d"].values)[0, 1]
+        if np.std(scores) > 0
+        else 0.0
+    )
+    rr = (
+        np.corrcoef(scores, df["pct_change"].values)[0, 1]
+        if np.std(scores) > 0
+        else 0.0
+    )
 
     # realized-return metrics (top quartile)
     top_real = df["pct_change"].values[top_mask]
@@ -337,37 +359,37 @@ def evaluate(weights: np.ndarray, df: pd.DataFrame) -> dict:
 
     # simulated profit factor: three-case model (same logic as obj_sim_profit_factor)
     stop_dist = df["stop_distance_pct"].fillna(0.05).clip(lower=0.001).values[top_mask]
-    realized  = df["pct_change"].values[top_mask]
+    realized = df["pct_change"].values[top_mask]
     stop_trig = df["stop_triggered"].fillna(0).values[top_mask].astype(bool)
-    brk_trig  = df["breakout_triggered"].fillna(0).values[top_mask].astype(bool)
+    brk_trig = df["breakout_triggered"].fillna(0).values[top_mask].astype(bool)
     days_stop = df["days_to_stop"].fillna(9999).values[top_mask]
-    days_brk  = df["days_to_breakout"].fillna(9999).values[top_mask]
-    broke_first   = brk_trig  & (~stop_trig | (days_brk  <= days_stop))
-    stopped_first = stop_trig & (~brk_trig  | (days_stop <  days_brk))
-    capped_peak   = np.minimum(top_peak, stop_dist * R_CAP)
-    sim_ret   = np.where(broke_first, capped_peak,
-                np.where(stopped_first, -stop_dist,
-                         realized))
-    sim_gw    = sim_ret[sim_ret > 0].sum()
-    sim_gl    = abs(sim_ret[sim_ret < 0].sum())
+    days_brk = df["days_to_breakout"].fillna(9999).values[top_mask]
+    broke_first = brk_trig & (~stop_trig | (days_brk <= days_stop))
+    stopped_first = stop_trig & (~brk_trig | (days_stop < days_brk))
+    capped_peak = np.minimum(top_peak, stop_dist * R_CAP)
+    sim_ret = np.where(
+        broke_first, capped_peak, np.where(stopped_first, -stop_dist, realized)
+    )
+    sim_gw = sim_ret[sim_ret > 0].sum()
+    sim_gl = abs(sim_ret[sim_ret < 0].sum())
 
     return {
-        "n":            len(df),
+        "n": len(df),
         # correlation metrics
-        "corr_20d":     round(float(r20), 4),
-        "corr_10d":     round(float(r10), 4),
-        "corr_realized":round(float(rr),  4),
+        "corr_20d": round(float(r20), 4),
+        "corr_10d": round(float(r10), 4),
+        "corr_realized": round(float(rr), 4),
         # realized-return metrics (top quartile)
-        "real_wr":      round(float((top_real > 0).mean()),       3),
-        "real_pf":      round(float(real_gw / real_gl) if real_gl > 0 else 0.0, 3),
-        "real_avg":     round(float(top_real.mean()),             4),
+        "real_wr": round(float((top_real > 0).mean()), 3),
+        "real_pf": round(float(real_gw / real_gl) if real_gl > 0 else 0.0, 3),
+        "real_avg": round(float(top_real.mean()), 4),
         # peak-gain metrics (breakout-aligned)
-        "peak_wr":      round(float(peak_wr),                     3),
-        "peak_avg":     round(float(top_peak.mean()),             4),
+        "peak_wr": round(float(peak_wr), 3),
+        "peak_avg": round(float(top_peak.mean()), 4),
         # simulated profit factor (stop-loss model + peak-20d exit)
-        "sim_pf":       round(float(sim_gw / sim_gl) if sim_gl > 0 else 0.0, 3),
-        "sim_wr":       round(float((sim_ret > 0).mean()),        3),
-        "sim_avg":      round(float(sim_ret.mean()),              4),
+        "sim_pf": round(float(sim_gw / sim_gl) if sim_gl > 0 else 0.0, 3),
+        "sim_wr": round(float((sim_ret > 0).mean()), 3),
+        "sim_avg": round(float(sim_ret.mean()), 4),
     }
 
 
@@ -385,14 +407,21 @@ def print_eval(label: str, m: dict) -> None:
     print(f"    corr peak-10d:   {m['corr_10d']:+.4f}")
     print(f"    corr realized:   {m['corr_realized']:+.4f}")
     print(f"    ── simulated trade (stop-loss model, {R_CAP:.0f}R-capped exit) ──")
-    print(f"    sim profit factor: {m['sim_pf']:.3f}   win rate: {m['sim_wr']:.1%}   avg: {m['sim_avg']:+.2%}")
+    print(
+        f"    sim profit factor: {m['sim_pf']:.3f}   win rate: {m['sim_wr']:.1%}   avg: {m['sim_avg']:+.2%}"
+    )
     print(f"    ── top-quartile realized return ──")
-    print(f"    real profit factor:{m['real_pf']:.3f}   win rate: {m['real_wr']:.1%}   avg: {m['real_avg']:+.2%}")
+    print(
+        f"    real profit factor:{m['real_pf']:.3f}   win rate: {m['real_wr']:.1%}   avg: {m['real_avg']:+.2%}"
+    )
     print(f"    ── peak gain (max_gain_20d) ──")
-    print(f"    peak win rate ({PEAK_WIN_THRESHOLD:.0%}+): {m['peak_wr']:.1%}   avg peak: {m['peak_avg']:+.2%}")
+    print(
+        f"    peak win rate ({PEAK_WIN_THRESHOLD:.0%}+): {m['peak_wr']:.1%}   avg peak: {m['peak_avg']:+.2%}"
+    )
 
 
 # ── train/test split ──────────────────────────────────────────────────────────
+
 
 def time_split(df: pd.DataFrame, train_frac: float = 0.70):
     df_sorted = df.sort_values("scan_date").reset_index(drop=True)
@@ -403,16 +432,16 @@ def time_split(df: pd.DataFrame, train_frac: float = 0.70):
 # ── walk-forward validation ───────────────────────────────────────────────────
 
 _METRIC_KEY = {
-    "sim_pf":        "sim_pf",
-    "composite":     "sim_pf",
+    "sim_pf": "sim_pf",
+    "composite": "sim_pf",
     "peak_win_rate": "peak_wr",
-    "corr_20d":      "corr_20d",
-    "corr_10d":      "corr_10d",
+    "corr_20d": "corr_20d",
+    "corr_10d": "corr_10d",
     "corr_realized": "corr_realized",
-    "win_rate":      "real_wr",
+    "win_rate": "real_wr",
     "profit_factor": "real_pf",
-    "spearman_20d":  "corr_20d",
-    "spearman_10d":  "corr_10d",
+    "spearman_20d": "corr_20d",
+    "spearman_10d": "corr_10d",
 }
 
 
@@ -427,27 +456,40 @@ def walk_forward_folds(
     df["_dt"] = dt
 
     data_start = dt.min()
-    data_end   = dt.max()
+    data_end = dt.max()
     folds = []
     test_start = data_start + pd.DateOffset(months=train_months)
 
     while test_start <= data_end:
-        test_end   = min(test_start + pd.DateOffset(months=test_months) - pd.Timedelta(days=1), data_end)
-        train_end  = test_start - pd.Timedelta(days=1)
+        test_end = min(
+            test_start + pd.DateOffset(months=test_months) - pd.Timedelta(days=1),
+            data_end,
+        )
+        train_end = test_start - pd.Timedelta(days=1)
         train_start = (
-            data_start if expanding
+            data_start
+            if expanding
             else train_end - pd.DateOffset(months=train_months) + pd.Timedelta(days=1)
         )
 
-        train_df = df[(df["_dt"] >= train_start) & (df["_dt"] <= train_end)].drop(columns=["_dt"])
-        test_df  = df[(df["_dt"] >= test_start)  & (df["_dt"] <= test_end)].drop(columns=["_dt"])
+        train_df = df[(df["_dt"] >= train_start) & (df["_dt"] <= train_end)].drop(
+            columns=["_dt"]
+        )
+        test_df = df[(df["_dt"] >= test_start) & (df["_dt"] <= test_end)].drop(
+            columns=["_dt"]
+        )
 
         if len(train_df) >= 20 and len(test_df) >= 5:
-            folds.append((
-                train_df.copy(), test_df.copy(),
-                train_start.strftime("%Y-%m-%d"), train_end.strftime("%Y-%m-%d"),
-                test_start.strftime("%Y-%m-%d"),  test_end.strftime("%Y-%m-%d"),
-            ))
+            folds.append(
+                (
+                    train_df.copy(),
+                    test_df.copy(),
+                    train_start.strftime("%Y-%m-%d"),
+                    train_end.strftime("%Y-%m-%d"),
+                    test_start.strftime("%Y-%m-%d"),
+                    test_end.strftime("%Y-%m-%d"),
+                )
+            )
 
         test_start = test_start + pd.DateOffset(months=test_months)
 
@@ -471,7 +513,9 @@ def run_walk_forward(
         span = (d1.year - d0.year) * 12 + (d1.month - d0.month)
         need = train_months + test_months
         print(f"  data range: {d0.date()} → {d1.date()} (~{span} months)")
-        print(f"  need at least {need} months for one fold (train={train_months} + test={test_months})")
+        print(
+            f"  need at least {need} months for one fold (train={train_months} + test={test_months})"
+        )
         if span >= 3:
             sug_tr = max(2, span - 2)
             print(f"  try: --train-months {sug_tr} --test-months {span - sug_tr}")
@@ -484,28 +528,36 @@ def run_walk_forward(
         print(
             f"  fold {i}/{len(folds)}: train={tr_s}–{tr_e} (n={len(tr_df)})"
             f"  test={te_s}–{te_e} (n={len(te_df)})  ...",
-            end=" ", flush=True,
+            end=" ",
+            flush=True,
         )
-        opt_w, _ = optimize(tr_df, objective=objective, n_restarts=n_restarts,
-                            regularize=regularize, reg_strength=reg_strength)
+        opt_w, _ = optimize(
+            tr_df,
+            objective=objective,
+            n_restarts=n_restarts,
+            regularize=regularize,
+            reg_strength=reg_strength,
+        )
         tr_m = evaluate(opt_w, tr_df)
         te_m = evaluate(opt_w, te_df)
         print(f"train {mkey}={tr_m[mkey]:+.4f}  test {mkey}={te_m[mkey]:+.4f}")
 
-        results.append({
-            "fold":          i,
-            "train_start":   tr_s,
-            "train_end":     tr_e,
-            "test_start":    te_s,
-            "test_end":      te_e,
-            "n_train":       len(tr_df),
-            "n_test":        len(te_df),
-            "weights":       opt_w,
-            "train_metric":  tr_m[mkey],
-            "test_metric":   te_m[mkey],
-            "train_metrics": tr_m,
-            "test_metrics":  te_m,
-        })
+        results.append(
+            {
+                "fold": i,
+                "train_start": tr_s,
+                "train_end": tr_e,
+                "test_start": te_s,
+                "test_end": te_e,
+                "n_train": len(tr_df),
+                "n_test": len(te_df),
+                "weights": opt_w,
+                "train_metric": tr_m[mkey],
+                "test_metric": te_m[mkey],
+                "train_metrics": tr_m,
+                "test_metrics": te_m,
+            }
+        )
     return results
 
 
@@ -541,27 +593,33 @@ def print_walk_forward_report(
             f"{r['train_metric']:>+8.4f}  {r['test_metric']:>+8.4f}"
         )
 
-    oos = [r["test_metric"]  for r in fold_results]
+    oos = [r["test_metric"] for r in fold_results]
     ins = [r["train_metric"] for r in fold_results]
     ddof = 1 if len(fold_results) > 1 else 0
     print(sep)
     print(f"  {'mean':<59}  {np.mean(ins):>+8.4f}  {np.mean(oos):>+8.4f}")
-    print(f"  {'std':<59}  {np.std(ins, ddof=ddof):>8.4f}  {np.std(oos, ddof=ddof):>8.4f}")
+    print(
+        f"  {'std':<59}  {np.std(ins, ddof=ddof):>8.4f}  {np.std(oos, ddof=ddof):>8.4f}"
+    )
 
     gap = np.mean(ins) - np.mean(oos)
     verdict = (
-        "WARNING: significant overfitting" if gap > 0.05
-        else "MILD overfitting"              if gap > 0.02
+        "WARNING: significant overfitting"
+        if gap > 0.05
+        else "MILD overfitting"
+        if gap > 0.02
         else "OK — gap is small"
     )
     print(f"\n  overfit gap (in-sample minus OOS): {gap:+.4f}  ({verdict})")
 
     # weight stability across folds
-    all_w  = np.vstack([r["weights"] for r in fold_results])
+    all_w = np.vstack([r["weights"] for r in fold_results])
     n_folds = len(fold_results)
     cw = 6
     print(f"\n  weight stability across {n_folds} folds:")
-    header = f"  {'component':<28}" + "".join(f"  {'f'+str(r['fold']):>{cw}}" for r in fold_results)
+    header = f"  {'component':<28}" + "".join(
+        f"  {'f' + str(r['fold']):>{cw}}" for r in fold_results
+    )
     header += f"  {'mean':>{cw}}  {'std':>{cw}}"
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -582,6 +640,7 @@ def print_walk_forward_report(
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(description="breakout engine weight optimizer")
     parser.add_argument(
@@ -592,30 +651,42 @@ def main():
     )
     parser.add_argument("--min-score", type=float, default=0.0)
     parser.add_argument(
-        "--passes-only", action="store_true", default=True,
+        "--passes-only",
+        action="store_true",
+        default=True,
         help="only use stocks that pass all hard filters (default: true)",
     )
     parser.add_argument("--no-passes-only", dest="passes_only", action="store_false")
-    parser.add_argument("--restarts", type=int, default=20,
-                        help="number of random optimizer restarts (default: 20)")
+    parser.add_argument(
+        "--restarts",
+        type=int,
+        default=20,
+        help="number of random optimizer restarts (default: 20)",
+    )
     parser.add_argument("--walk-forward", action="store_true")
     parser.add_argument("--train-months", type=int, default=6)
-    parser.add_argument("--test-months",  type=int, default=3)
+    parser.add_argument("--test-months", type=int, default=3)
     parser.add_argument(
-        "--rolling", action="store_true",
+        "--rolling",
+        action="store_true",
         help="use rolling (fixed-size) train window instead of expanding",
     )
     parser.add_argument(
-        "--regularize", action="store_true",
+        "--regularize",
+        action="store_true",
         help="add L2 penalty to keep weights near current values (reduces overfitting)",
     )
     parser.add_argument(
-        "--reg-strength", type=float, default=0.005,
+        "--reg-strength",
+        type=float,
+        default=0.005,
         help="L2 regularization strength (default: 0.005; try 0.01-0.05 for tighter constraint)",
     )
     args = parser.parse_args()
 
-    print(f"\nloading data (passes_only={args.passes_only}, min_score={args.min_score})...")
+    print(
+        f"\nloading data (passes_only={args.passes_only}, min_score={args.min_score})..."
+    )
     df = load_data(min_score=args.min_score, passes_only=args.passes_only)
     print(f"loaded {len(df)} records with outcome data")
 
@@ -657,8 +728,13 @@ def main():
     print_eval("current — full ", evaluate(CURRENT_W, df))
 
     print(f"\noptimizing on train set ({len(train)} records)...")
-    opt_w, train_metric = optimize(train, objective=args.objective, n_restarts=args.restarts,
-                                   regularize=args.regularize, reg_strength=args.reg_strength)
+    opt_w, train_metric = optimize(
+        train,
+        objective=args.objective,
+        n_restarts=args.restarts,
+        regularize=args.regularize,
+        reg_strength=args.reg_strength,
+    )
 
     print("-" * W)
     print_weights("optimized weights", opt_w)
@@ -667,13 +743,11 @@ def main():
     print_eval("optimized — test ", evaluate(opt_w, test))
     print_eval("optimized — full ", evaluate(opt_w, df))
 
-    # suggested config update
-    labels = ["base_quality", "trend_strength", "relative_strength", "volume_profile", "risk_reward"]
     print("\n" + "=" * W)
     print("suggested config.py update:")
     print("  'weights': {")
-    for label, val in zip(labels, opt_w):
-        print(f"    '{label}': {round(val)},")
+    for comp, val in zip(COMPONENTS, opt_w):
+        print(f"    '{_DB_TO_CONFIG[comp]}': {round(val)},")
     print("  }")
     print(f"  (sum: {sum(round(v) for v in opt_w)})")
 
@@ -686,7 +760,7 @@ def main():
     if len(test) >= 10:
         mkey = _METRIC_KEY[args.objective]
         cur_oos = evaluate(CURRENT_W, test)[mkey]
-        opt_oos = evaluate(opt_w,     test)[mkey]
+        opt_oos = evaluate(opt_w, test)[mkey]
         direction = "GOOD" if opt_oos > cur_oos else "OVERFIT WARNING"
         print(f"\nout-of-sample {mkey}: {cur_oos:.4f} → {opt_oos:.4f} ({direction})")
 

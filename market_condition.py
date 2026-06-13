@@ -27,11 +27,11 @@ Based on methods from:
       · High-vol environments and trend-following: Ang et al. (2006)
 
 Score (0–100) → Regime:
-  80–100  BULL       — Optimal.  Trade aggressively, full sizing.
-  65– 79  UPTREND    — Good.     Trade normally.
-  50– 64  MIXED      — Selective. Smaller positions, tighter criteria.
-  35– 49  CAUTION    — Very selective.  Reduce exposure significantly.
-   0– 34  DOWNTREND  — Avoid new longs.  Cash is a position.
+  70–100  BULL       — Optimal.  Trade aggressively, full sizing.
+  55– 69  UPTREND    — Good.     Trade normally.
+  40– 54  MIXED      — Selective. Smaller positions, tighter criteria.
+  25– 39  CAUTION    — Very selective.  Reduce exposure significantly.
+   0– 24  DOWNTREND  — Avoid new longs.  Cash is a position.
 
 Component weights (total = 100 pts):
   Index Trend       25   SMA alignment + 50d slope + SPY/IWM confirmation
@@ -116,12 +116,15 @@ class MarketConditionAnalyzer:
     """
 
     # (name, min_score, max_score_inclusive, stock-score multiplier)
+    # expanded BULL zone to 70+ (was 80+): the 65-79 band was too wide and contained
+    # mixed-outcome sessions that are genuinely BULL-like. shrinking UPTREND to 55-69
+    # makes regime boundaries more discriminating (section 6.3, 2026-05).
     REGIMES = [
-        ("BULL",      80, 100, 1.00),
-        ("UPTREND",   65,  79, 0.95),
-        ("MIXED",     50,  64, 0.85),
-        ("CAUTION",   35,  49, 0.70),
-        ("DOWNTREND",  0,  34, 0.50),
+        ("BULL",      70, 100, 1.00),
+        ("UPTREND",   55,  69, 0.95),
+        ("MIXED",     40,  54, 0.85),
+        ("CAUTION",   25,  39, 0.70),
+        ("DOWNTREND",  0,  24, 0.50),
     ]
 
     _SMA_PERIODS = [10, 20, 50, 150, 200]
@@ -576,8 +579,9 @@ class MarketConditionAnalyzer:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _classify_regime(self, score: float) -> tuple[str, float]:
-        for name, lo, hi, mult in self.REGIMES:
-            if lo <= score <= hi:
+        # REGIMES ordered high→low; first matching lower-bound wins
+        for name, lo, _hi, mult in self.REGIMES:
+            if score >= lo:
                 return name, mult
         return "DOWNTREND", 0.50
 
