@@ -486,6 +486,49 @@ class TestRelativeStrength:
         # Should be approximately 0.15 (excess return)
         assert rs_60 == pytest.approx(0.15, abs=0.005)
 
+    def test_skip_days_zero_matches_no_skip(self):
+        """skip_days=0 must produce identical results to the default (no arg)."""
+        n = 130
+        stock_p = np.linspace(10, 15, n)
+        bench_p = np.linspace(100, 110, n)
+        s1, b1 = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        s2, b2 = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        f = make_features()
+        r1 = f.calculate_relative_strength(s1, b1, "COMP", skip_days=0)
+        r2 = f.calculate_relative_strength(s2, b2, "COMP")
+        pd.testing.assert_series_equal(r1["rs_comp_60"], r2["rs_comp_60"])
+
+    def test_skip_days_excludes_recent_surge(self):
+        """
+        When the stock surges only in the final 5 bars, skip_days=5 should
+        produce a lower rs_comp_60 than skip_days=0 because the surge is
+        excluded from the measurement window.
+        """
+        n = 200
+        # flat benchmark; stock flat then jumps only in the last 5 bars
+        bench_p = np.ones(n) * 100.0
+        stock_p = np.concatenate([np.ones(195) * 10.0, np.linspace(10.0, 14.0, 5)])
+        s_no_skip, b_no_skip = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        s_skip, b_skip = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        f = make_features()
+        r_no_skip = f.calculate_relative_strength(s_no_skip, b_no_skip, "COMP", skip_days=0)
+        r_skip = f.calculate_relative_strength(s_skip, b_skip, "COMP", skip_days=5)
+        rs_no_skip = r_no_skip["rs_comp_60"].iloc[-1]
+        rs_skip = r_skip["rs_comp_60"].iloc[-1]
+        # skip excludes the final surge — skip value should be lower
+        assert rs_skip < rs_no_skip
+
+    def test_skip_days_columns_still_created(self):
+        """skip_days > 0 must still produce all four rs_comp_* columns."""
+        n = 130
+        stock_p = np.linspace(10, 15, n)
+        bench_p = np.linspace(100, 110, n)
+        s_df, b_df = self._aligned_pair(stock_p, bench_p, n)
+        f = make_features()
+        s_df = f.calculate_relative_strength(s_df, b_df, "COMP", skip_days=5)
+        for period in [20, 60, 120, 252]:
+            assert f"rs_comp_{period}" in s_df.columns
+
 
 # ===========================================================================
 # 7. VOLUME DRY-UP DETECTION

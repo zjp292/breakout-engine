@@ -18,6 +18,7 @@ PARAMETERS = {
     "volume_dryup_window": 10,
     # relative strength
     "rs_lookback_periods": [20, 60, 120, 252],
+    "rs_skip_days": 5,
     "rs_rank_window": 60,
     # prior move
     "prior_move_window": 60,

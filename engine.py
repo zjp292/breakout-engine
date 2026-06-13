@@ -799,7 +799,7 @@ class Features:
 
         return df
 
-    def calculate_relative_strength(self, df, benchmark_df, benchmark_name="SPY"):
+    def calculate_relative_strength(self, df, benchmark_df, benchmark_name="SPY", skip_days=0):
         """
         Calculate relative strength vs benchmark as excess return.
 
@@ -810,36 +810,31 @@ class Features:
         - Bear market: stock +5%, benchmark -5% → RS = +10%   (strong RS signal)
         - Laggard:     stock -5%, benchmark +5% → RS = -10%   (underperforming)
 
-        The old ratio formula broke in bear markets: a stock that held up while
-        the market sold off would produce a negative ratio and get 0 RS points —
-        the exact opposite of the correct signal.
-
-        Args:
-            df: Stock dataframe
-            benchmark_df: Benchmark dataframe with same date index
-            benchmark_name: Name of benchmark for column naming
-
-        Returns df with:
-        - rs_{benchmark}_20: 20-day excess return vs benchmark
-        - rs_{benchmark}_60: 60-day excess return vs benchmark
-        - rs_{benchmark}_120: 120-day excess return vs benchmark
+        skip_days (JT1993 skip-month): when > 0, both series are shifted so the
+        measurement window ends skip_days ago rather than today. e.g. skip_days=5
+        computes rs_comp_60 as (close[-6]/close[-66])-1, excluding the most recent
+        week. this reduces short-term reversal noise (bid-ask bounce, microstructure)
+        that attenuates the true momentum signal (Jegadeesh & Titman 1993, JF).
         """
         benchmark_aligned = benchmark_df.reindex(df.index, method="ffill")
 
+        stock_close = df["close"].shift(skip_days) if skip_days > 0 else df["close"]
+
+        if "close" in benchmark_aligned.columns:
+            bench_close = (
+                benchmark_aligned["close"].shift(skip_days)
+                if skip_days > 0
+                else benchmark_aligned["close"]
+            )
+        else:
+            bench_col = benchmark_aligned.iloc[:, 0]
+            bench_close = bench_col.shift(skip_days) if skip_days > 0 else bench_col
+
         for period in [20, 60, 120, 252]:
-            stock_pct_change = df["close"].pct_change(periods=period)
+            stock_pct_change = stock_close.pct_change(periods=period)
+            benchmark_pct_change = bench_close.pct_change(periods=period)
 
-            if "close" in benchmark_aligned.columns:
-                benchmark_pct_change = benchmark_aligned["close"].pct_change(
-                    periods=period
-                )
-            else:
-                benchmark_pct_change = benchmark_aligned.iloc[:, 0].pct_change(
-                    periods=period
-                )
-
-            # Excess return: positive = outperforming, negative = underperforming
-            # Handles bear markets correctly — no sign inversion
+            # excess return: positive = outperforming, negative = underperforming
             df[f"rs_{benchmark_name.lower()}_{period}"] = (
                 stock_pct_change - benchmark_pct_change
             )
@@ -1229,8 +1224,9 @@ class Features:
 
         # Relative Strength vs NASDAQ Composite - if benchmark provided
         if benchmark_df is not None:
+            skip = self.config.get("rs_skip_days", 0)
             df = self.calculate_relative_strength(
-                df, benchmark_df, benchmark_name="COMP"
+                df, benchmark_df, benchmark_name="COMP", skip_days=skip
             )
 
         return df
