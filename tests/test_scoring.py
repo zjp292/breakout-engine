@@ -84,6 +84,7 @@ def make_row(**overrides) -> pd.Series:
         "obv_trend": False,             # OBV accumulation bonus: off by default
         "weekly_aligned": True,         # weekly alignment: True = no penalty
         "approaching_annual_high": False,  # GH2004 anchoring alpha: off by default
+        "analyst_coverage": None,       # HLS2000 coverage adj: None = unknown, no adjustment
         # --- Volume ---
         "dollar_volume": 50_000_000,    # $50M
         "volume_declining": True,
@@ -557,6 +558,89 @@ class TestScoreTrendStrength:
         row = make_row(approaching_annual_high=False, consol_days=30, weekly_aligned=True)
         _, d = self.scoring.score_trend_strength(row)
         assert d["approaching_annual_high"] == 0.0
+
+    # --- analyst coverage (HLS2000) ---
+
+    def _scoring_with_coverage(self):
+        """Return a Scoring instance with score_analyst_coverage enabled."""
+        from config import PARAMETERS
+        cfg = PARAMETERS.copy()
+        cfg["score_analyst_coverage"] = True
+        s = Scoring(cfg)
+        s.regime_multiplier = 1.0
+        return s
+
+    def test_analyst_coverage_zero_analysts_adds_2pts(self):
+        """0 analysts → +2 pts (fastest information diffusion gap per HLS2000)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=0, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 2.0
+
+    def test_analyst_coverage_1_analyst_adds_1pt(self):
+        """1 analyst → +1 pt."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=1, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 1.0
+
+    def test_analyst_coverage_2_analysts_adds_1pt(self):
+        """2 analysts → +1 pt (still under-covered)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=2, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 1.0
+
+    def test_analyst_coverage_3_to_5_adds_zero(self):
+        """3–5 analysts → 0 pts (neutral tier)."""
+        s = self._scoring_with_coverage()
+        for n in (3, 4, 5):
+            row = make_row(analyst_coverage=n, weekly_aligned=True)
+            _, d = s.score_trend_strength(row)
+            assert d["analyst_coverage"] == 0.0, f"n={n} should give 0 pts"
+
+    def test_analyst_coverage_6plus_subtracts_1pt(self):
+        """6+ analysts → -1 pt (widely-followed stock, momentum already priced in)."""
+        s = self._scoring_with_coverage()
+        for n in (6, 10, 20):
+            row = make_row(analyst_coverage=n, weekly_aligned=True)
+            _, d = s.score_trend_strength(row)
+            assert d["analyst_coverage"] == -1.0, f"n={n} should give -1 pt"
+
+    def test_analyst_coverage_none_skips_adjustment(self):
+        """analyst_coverage=None → 0 adjustment (graceful degradation for missing data)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=None, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 0.0
+
+    def test_analyst_coverage_nan_skips_adjustment(self):
+        """analyst_coverage=NaN → 0 adjustment (same as None, covers stamped np.nan)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=float("nan"), weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 0.0
+
+    def test_analyst_coverage_flag_off_skips_adjustment(self):
+        """When score_analyst_coverage=False (default), analyst_coverage is always 0."""
+        row = make_row(analyst_coverage=0, weekly_aligned=True)
+        _, d = self.scoring.score_trend_strength(row)
+        assert d["analyst_coverage"] == 0.0
+
+    def test_analyst_coverage_score_floored_at_zero(self):
+        """High-coverage penalty cannot drag score below 0 (floor check)."""
+        s = self._scoring_with_coverage()
+        # minimal trend score: no alignment, no prior move, no GH2004, weekly misaligned
+        row = make_row(
+            ma_alignment=False, mas_rising=False, ema10_surf_ratio=0.0,
+            sma_10=40.0, sma_20=45.0,  # sma_10 < sma_20 → 0 pts MA
+            prior_move_pct=0.75, days_since_power_move=95,  # outside 90d window → 0 pts
+            approaching_annual_high=False,
+            weekly_aligned=False,  # -5 penalty
+            analyst_coverage=10,   # -1 from coverage
+        )
+        score, d = s.score_trend_strength(row)
+        assert score >= 0.0
 
 
 # ===========================================================================

@@ -8,6 +8,25 @@ from models import ScoreBreakdown
 from datetime import datetime, timedelta
 
 
+def _get_analyst_coverage(symbol: str) -> Optional[int]:
+    """
+    Return the number of analyst opinions for a symbol via yfinance.
+
+    Returns None on any failure — callers treat None as unknown coverage
+    and skip the scoring adjustment entirely.
+    """
+    try:
+        import yfinance as yf
+
+        info = yf.Ticker(symbol).info
+        n = info.get("numberOfAnalystOpinions")
+        if n is None:
+            return None
+        return int(n)
+    except Exception:
+        return None
+
+
 def _get_days_to_earnings(symbol: str, as_of_date_str: str) -> Optional[int]:
     """
     Return calendar days to the next scheduled earnings date.
@@ -88,6 +107,31 @@ class Engine:
                 try:
                     sym, days = future.result(timeout=10)
                     results[sym] = days
+                except Exception:
+                    results[futures[future]] = None
+
+        return results
+
+    def _fetch_analyst_coverage_batch(
+        self, symbols: list, max_workers: int = 20
+    ) -> dict:
+        """
+        Fetch analyst opinion count for every symbol in parallel.
+
+        Returns {symbol: int_or_None}. Failures are silently swallowed —
+        the caller treats None as unknown coverage and skips scoring adjustment.
+        """
+        results = {}
+
+        def _fetch(sym):
+            return sym, _get_analyst_coverage(sym)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_fetch, s): s for s in symbols}
+            for future in as_completed(futures):
+                try:
+                    sym, count = future.result(timeout=10)
+                    results[sym] = count
                 except Exception:
                     results[futures[future]] = None
 
@@ -468,12 +512,20 @@ class Engine:
             print(f"Warning: Could not load benchmark data: {e}")
             self.benchmark_df = None
 
-        # Fetch earnings calendars for all symbols in parallel before the per-stock loop
+        # Fetch earnings calendars and analyst coverage for all symbols in parallel
         all_symbols = [pf.stem.split("-")[0] for pf in pickle_files]
         print(f"Fetching earnings calendars for {len(all_symbols)} symbols...")
         earnings_map = self._fetch_earnings_batch(all_symbols, date_str)
         n_with_earnings = sum(1 for v in earnings_map.values() if v is not None)
-        print(f"  Earnings data found for {n_with_earnings}/{len(all_symbols)} symbols\n")
+        print(f"  Earnings data found for {n_with_earnings}/{len(all_symbols)} symbols")
+
+        coverage_map = {}
+        if self.config.get("score_analyst_coverage", False):
+            print(f"Fetching analyst coverage for {len(all_symbols)} symbols...")
+            coverage_map = self._fetch_analyst_coverage_batch(all_symbols)
+            n_with_coverage = sum(1 for v in coverage_map.values() if v is not None)
+            print(f"  Coverage data found for {n_with_coverage}/{len(all_symbols)} symbols")
+        print()
 
         # Dictionary to store feature dataframes (scored after market condition)
         scored_dfs = {}
@@ -507,6 +559,12 @@ class Engine:
                 # and by the watchlist for the ⚠ warning. None = unknown (no penalty).
                 days = earnings_map.get(symbol)
                 feature_df["days_to_earnings"] = days if days is not None else np.nan
+
+                # stamp analyst_coverage; None = unknown (scoring skips adjustment)
+                coverage = coverage_map.get(symbol)
+                feature_df["analyst_coverage"] = (
+                    float(coverage) if coverage is not None else np.nan
+                )
 
                 scored_dfs[symbol] = feature_df
 
@@ -1440,12 +1498,14 @@ class Scoring:
         Score underlying trend structure — Qullamaggie + Minervini combined.
 
         Components (2026-06: stage2 removed as anti-predictive; proximity removed 2026-06):
-        - Short-term MA           (0-4pts):  10>20>50 aligned + rising
-        - Prior power move        (0-8pts):  Flagpole size; 100%+ produces 68.9% breakout rate
-        - Approaching annual high (0-2pts):  George & Hwang (2004) anchoring-underreaction alpha
+        - Short-term MA           (0-4pts):   10>20>50 aligned + rising
+        - Prior power move        (0-8pts):   Flagpole size; 100%+ produces 68.9% breakout rate
+        - Approaching annual high (0-2pts):   George & Hwang (2004) anchoring-underreaction alpha
         - Weekly alignment        (penalty -5pts if weekly trend broken)
+        - Analyst coverage adj    (±2/-1pts): Hong, Lim & Stein (2000) info-diffusion alpha;
+                                              gated on score_analyst_coverage config flag
 
-        Sub-max = 14 (4+8+2; used by calculate_total_score for normalization).
+        Sub-max = 14 (4+8+2; analyst coverage is a ±adjustment within that range).
         Stage 2 removed 2026-06: DB analysis (n=4662, prior>=75%) showed
         stage2=True EV=0.195 vs stage2=False EV=0.276 — full Stage 2 stocks are extended;
         fresh breakout stocks (transitioning INTO Stage 2) outperform by 40%.
@@ -1523,6 +1583,29 @@ class Scoring:
             details["weekly_alignment"] = -5.0
         else:
             details["weekly_alignment"] = 0.0
+
+        # 7. ANALYST COVERAGE ADJUSTMENT (hong, lim & stein 2000, JF 55:265)
+        # information diffuses more slowly through under-covered stocks → longer
+        # underreaction window → stronger and more persistent momentum.
+        # 0 analysts → +2 pts | 1-2 → +1 pt | 3-5 → 0 pts | 6+ → -1 pt
+        # gated on score_analyst_coverage config flag; None/NaN = skip silently
+        details["analyst_coverage"] = 0.0
+        if self.config.get("score_analyst_coverage", False):
+            raw_coverage = row.get("analyst_coverage")
+            if raw_coverage is not None and not (
+                isinstance(raw_coverage, float) and np.isnan(raw_coverage)
+            ):
+                n = int(raw_coverage)
+                if n == 0:
+                    coverage_adj = 2.0
+                elif n <= 2:
+                    coverage_adj = 1.0
+                elif n <= 5:
+                    coverage_adj = 0.0
+                else:
+                    coverage_adj = -1.0
+                score = max(0.0, score + coverage_adj)
+                details["analyst_coverage"] = coverage_adj
 
         return score, details
 

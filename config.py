@@ -41,6 +41,8 @@ PARAMETERS = {
         "volume_profile": 50,
         "risk_reward": 0,
     },
+    # analyst coverage scoring
+    "score_analyst_coverage": True,
     # alert thresholds
     "min_score_alert": 80,
     "min_score_watchlist": 70,
