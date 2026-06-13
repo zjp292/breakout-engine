@@ -92,6 +92,7 @@ def make_row(**overrides) -> pd.Series:
         "relative_volume": 0.80,
         "volume_sma_20": 500_000,
         "close_range_position": 0.50,   # mid-range close — demand bonus threshold is 0.70
+        "volume_vs_6m_avg": 0.50,       # LS2000: 50% of 1-year avg — genuinely quiet base (no penalty)
         # --- Relative strength ---
         "rs_comp_252": 0.10,           # 10% 12-month excess return — passes rs_252 filter
         "rs_comp_120": 0.15,
@@ -830,6 +831,44 @@ class TestScoreVolumeProfile:
                        obv_trend=False)
         _, d = self.scoring.score_volume_profile(row)
         assert d["volume_contraction"] == 10.5
+
+    # --- 4e. Lee-Swaminathan (2000) historical volume penalty ---
+
+    def test_ls2000_penalty_fires_when_base_vol_elevated_vs_historical(self):
+        """volume_vs_6m_avg > 0.90 deducts 2 pts — base not structurally quiet."""
+        row_normal = make_row(dollar_volume=0, adr_pct=0.0,
+                              volume_declining=True, volume_dryup_ratio=0.60,
+                              volume_vs_6m_avg=0.50)  # base at 50% of 1yr avg: genuinely quiet
+        row_elevated = make_row(dollar_volume=0, adr_pct=0.0,
+                                volume_declining=True, volume_dryup_ratio=0.60,
+                                volume_vs_6m_avg=0.95)  # base at 95% of 1yr avg: flagpole lull only
+        _, d_normal   = self.scoring.score_volume_profile(row_normal)
+        _, d_elevated = self.scoring.score_volume_profile(row_elevated)
+        assert d_elevated["volume_contraction"] == d_normal["volume_contraction"] - 2.0
+
+    def test_ls2000_penalty_absent_when_base_vol_quiet(self):
+        """volume_vs_6m_avg <= 0.90 leaves vd_score unchanged."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.60,
+                       volume_vs_6m_avg=0.90)  # exactly at threshold: no penalty (strict >)
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 10.5
+
+    def test_ls2000_penalty_floored_at_zero(self):
+        """penalty cannot push vd_score below 0."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=False, volume_dryup_ratio=1.0,
+                       volume_vs_6m_avg=0.95)  # vd_score=0 before penalty → stays at 0
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 0.0
+
+    def test_ls2000_penalty_absent_when_feature_missing(self):
+        """missing volume_vs_6m_avg (None) must not raise and must not penalize."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.60)
+        row = row.drop("volume_vs_6m_avg")  # simulate pre-feature historical data
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 10.5  # unpenalized baseline
 
 
 # ===========================================================================

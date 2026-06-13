@@ -16,6 +16,7 @@ PARAMETERS = {
     "volume_surge_multiplier": 1.5,
     "dollar_volume_min": 10_000_000,
     "volume_dryup_window": 10,
+    "volume_historical_avg_window": 252,
     # relative strength
     "rs_lookback_periods": [20, 60, 120, 252],
     "rs_skip_days": 5,

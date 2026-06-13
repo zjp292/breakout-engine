@@ -722,6 +722,14 @@ class Features:
             df["volume_trend"] < 0
         )
 
+        # lee-swaminathan (2000): base volume vs 1-year historical average.
+        # flagpole-relative dry-up can look great while base vol is still structurally
+        # elevated. a ratio > 0.90 means the "quiet" base is still near its own long-run
+        # norm — not genuine accumulation, just a lull after the flagpole.
+        hist_window = self.config.get("volume_historical_avg_window", 252)
+        hist_avg = df["volume"].rolling(window=hist_window, min_periods=hist_window // 2).mean()
+        df["volume_vs_6m_avg"] = recent_vol / hist_avg
+
         return df
 
     def detect_consolidation_range(self, df, lookback=None):
@@ -1684,6 +1692,14 @@ class Scoring:
             if row.get("obv_trend", False):
                 obv_bonus = 2.0 if vd_score >= 7.0 else 1.0
                 vd_score = min(14.0, vd_score + obv_bonus)
+
+            # lee-swaminathan (2000) historical vol penalty: if base volume is still
+            # >= 90% of the 1-year average, the "quiet" base is not structurally quiet —
+            # just quiet relative to the flagpole spike. genuine accumulation has base
+            # vol well below the stock's own historical norm.
+            vol_vs_hist = row.get("volume_vs_6m_avg", None)
+            if vol_vs_hist is not None and not np.isnan(vol_vs_hist) and vol_vs_hist > 0.90:
+                vd_score = max(0.0, vd_score - 2.0)
         else:
             vd_score = 0.0
 
