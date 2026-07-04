@@ -450,50 +450,32 @@ def walk_forward_folds(
     train_months: int = 6,
     test_months: int = 3,
     expanding: bool = True,
+    label_horizon_days: int = 60,
+    embargo_days: int = 10,
 ) -> list[tuple]:
-    dt = pd.to_datetime(df["scan_date"])
-    df = df.copy()
-    df["_dt"] = dt
+    """
+    purged + embargoed chronological folds (see validation.py). previously this
+    placed test_start immediately after train_end with no gap — since labels
+    here look forward up to 60 days (max_gain_60d), training rows within ~60d
+    of test_start had outcome windows bleeding into the test period. every
+    "walk-forward confirmed" result produced before this fix should be treated
+    as unverified until re-run.
+    """
+    from validation import purged_walk_forward_folds
 
-    data_start = dt.min()
-    data_end = dt.max()
-    folds = []
-    test_start = data_start + pd.DateOffset(months=train_months)
-
-    while test_start <= data_end:
-        test_end = min(
-            test_start + pd.DateOffset(months=test_months) - pd.Timedelta(days=1),
-            data_end,
-        )
-        train_end = test_start - pd.Timedelta(days=1)
-        train_start = (
-            data_start
-            if expanding
-            else train_end - pd.DateOffset(months=train_months) + pd.Timedelta(days=1)
-        )
-
-        train_df = df[(df["_dt"] >= train_start) & (df["_dt"] <= train_end)].drop(
-            columns=["_dt"]
-        )
-        test_df = df[(df["_dt"] >= test_start) & (df["_dt"] <= test_end)].drop(
-            columns=["_dt"]
-        )
-
-        if len(train_df) >= 20 and len(test_df) >= 5:
-            folds.append(
-                (
-                    train_df.copy(),
-                    test_df.copy(),
-                    train_start.strftime("%Y-%m-%d"),
-                    train_end.strftime("%Y-%m-%d"),
-                    test_start.strftime("%Y-%m-%d"),
-                    test_end.strftime("%Y-%m-%d"),
-                )
-            )
-
-        test_start = test_start + pd.DateOffset(months=test_months)
-
-    return folds
+    folds = purged_walk_forward_folds(
+        df,
+        date_col="scan_date",
+        train_months=train_months,
+        test_months=test_months,
+        label_horizon_days=label_horizon_days,
+        embargo_days=embargo_days,
+        expanding=expanding,
+    )
+    return [
+        (f["train_df"], f["test_df"], f["train_start"], f["train_end"], f["test_start"], f["test_end"])
+        for f in folds
+    ]
 
 
 def run_walk_forward(

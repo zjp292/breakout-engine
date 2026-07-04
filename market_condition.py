@@ -172,6 +172,18 @@ class MarketConditionAnalyzer:
         mom_score,  mom_det  = self._score_momentum_and_volatility(compx)
 
         total = idx_score + dist_score + ftd_score + brd_score + mom_score
+
+        # Barroso & Santa-Clara (2015, JFE 116:111): realized variance of the
+        # momentum-stock universe over the past 6M predicts momentum crashes.
+        # when momentum-stock vol is 50%+ above its own baseline, apply -5 pts.
+        # independent from index vol already scored in _score_momentum_and_volatility.
+        if self.config.get("score_momentum_universe_vol", True):
+            univ_vol_penalty, univ_vol_det = self._score_momentum_universe_vol(
+                stock_feature_dfs
+            )
+            total = max(0.0, total + univ_vol_penalty)
+            mom_det.update(univ_vol_det)
+
         regime, multiplier = self._classify_regime(total)
 
         spy_above_200 = False
@@ -573,6 +585,80 @@ class MarketConditionAnalyzer:
         details["vol_score"]  = vol_score
 
         return min(score, 15.0), details
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Component 6: Momentum Universe Volatility  (0 or −5 pts)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _score_momentum_universe_vol(
+        self, stock_dfs: Optional[dict]
+    ) -> tuple[float, dict]:
+        """
+        Barroso & Santa-Clara (2015, JFE 116:111): realized variance of the
+        momentum-stock universe over the past 6 months predicts crashes.
+        High recent vol in the momentum universe → size down / penalise score.
+
+        Algorithm:
+          1. Build an equal-weight average daily return series across all
+             watchlist stocks using their daily closes.
+          2. Compute the trailing 21-day std of that series (current vol).
+          3. Compute the rolling 63-day mean of trailing 21-day std (baseline).
+          4. ratio = current_vol / baseline_vol.
+          5. ratio > 1.5 → -5 pts penalty (momentum-stock vol is 50%+ elevated
+             above its own recent norm, independent of index vol).
+
+        Returns (penalty, details_dict). Insufficient data → (0.0, details).
+        """
+        details = {
+            "momentum_universe_vol_ratio": None,
+            "momentum_universe_vol_penalty": 0.0,
+        }
+
+        if not stock_dfs or len(stock_dfs) < 5:
+            return 0.0, details
+
+        # align closes on a common date index
+        close_series = {}
+        for sym, df in stock_dfs.items():
+            if df is None or len(df) < 25:
+                continue
+            c = df["close"] if "close" in df.columns else None
+            if c is not None:
+                close_series[sym] = c
+
+        if len(close_series) < 5:
+            return 0.0, details
+
+        # daily returns for each stock, then equal-weight mean per day
+        returns_df = pd.DataFrame(close_series).pct_change().dropna(how="all")
+        if len(returns_df) < 63 + 21:
+            return 0.0, details
+
+        avg_return = returns_df.mean(axis=1)
+
+        # 21-day rolling std of the universe average return
+        rolling_std_21 = avg_return.rolling(window=21, min_periods=15).std()
+
+        # baseline: 63-day rolling mean of that std
+        baseline_std = rolling_std_21.rolling(window=63, min_periods=40).mean()
+
+        current_std  = rolling_std_21.iloc[-1]
+        baseline_val = baseline_std.iloc[-1]
+
+        if (
+            pd.isna(current_std)
+            or pd.isna(baseline_val)
+            or baseline_val <= 0
+        ):
+            return 0.0, details
+
+        ratio = float(current_std / baseline_val)
+        details["momentum_universe_vol_ratio"] = round(ratio, 3)
+
+        penalty = -5.0 if ratio > 1.5 else 0.0
+        details["momentum_universe_vol_penalty"] = penalty
+
+        return penalty, details
 
     # ─────────────────────────────────────────────────────────────────────────
     # Regime classification

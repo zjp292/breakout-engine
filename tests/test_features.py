@@ -300,6 +300,39 @@ class TestFiftyTwoWeekProximity:
         pd.testing.assert_series_equal(df["pct_from_52wk_high"], expected,
                                        check_names=False)
 
+    def test_approaching_annual_high_in_window(self):
+        """pct_from_52wk_high between -3% and -15% → approaching_annual_high=True."""
+        f = make_features()
+        n = 260
+        # rise to high then pull back 8% — sits in the -3% to -15% anchor zone
+        prices_up = np.linspace(10, 50, n - 20)
+        prices_dn = np.full(20, 50 * 0.92)  # 8% below 52wk high
+        closes = np.concatenate([prices_up, prices_dn])
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame({
+            "open": closes, "high": closes * 1.005,
+            "low": closes * 0.995, "close": closes,
+            "volume": 1_000_000,
+        }, index=dates)
+        df = f.calculate_52wk_proximity(df)
+        assert df.iloc[-1]["approaching_annual_high"] is True or df.iloc[-1]["approaching_annual_high"] == True
+
+    def test_approaching_annual_high_false_when_too_deep(self):
+        """pct_from_52wk_high < -15% → approaching_annual_high=False (too deep in base)."""
+        f = make_features()
+        n = 260
+        prices_up = np.linspace(10, 50, n - 20)
+        prices_dn = np.full(20, 50 * 0.80)  # 20% below 52wk high — outside GH2004 window
+        closes = np.concatenate([prices_up, prices_dn])
+        dates = pd.date_range(end="2025-12-31", periods=n, freq="B")
+        df = pd.DataFrame({
+            "open": closes, "high": closes * 1.005,
+            "low": closes * 0.995, "close": closes,
+            "volume": 1_000_000,
+        }, index=dates)
+        df = f.calculate_52wk_proximity(df)
+        assert df.iloc[-1]["approaching_annual_high"] is False or df.iloc[-1]["approaching_annual_high"] == False
+
 
 # ===========================================================================
 # 5. VCP CONTRACTIONS
@@ -437,15 +470,26 @@ class TestRelativeStrength:
         assert rs_60 < 0.0, f"Expected negative RS for underperformer, got {rs_60}"
 
     def test_rs_columns_created_for_all_periods(self):
-        """Columns rs_comp_20, rs_comp_60, rs_comp_120 must be present."""
+        """Columns rs_comp_20, rs_comp_60, rs_comp_120, rs_comp_252 must be present."""
         n = 130
         stock_p = np.linspace(10, 15, n)
         bench_p = np.linspace(100, 110, n)
         s_df, b_df = self._aligned_pair(stock_p, bench_p, n)
         f = make_features()
         s_df = f.calculate_relative_strength(s_df, b_df, "COMP")
-        for period in [20, 60, 120]:
+        for period in [20, 60, 120, 252]:
             assert f"rs_comp_{period}" in s_df.columns
+
+    def test_rs_252_is_nan_for_short_history(self):
+        """< 252 bars of history → rs_comp_252 is all NaN (column still created)."""
+        n = 130
+        stock_p = np.linspace(10, 15, n)
+        bench_p = np.linspace(100, 110, n)
+        s_df, b_df = self._aligned_pair(stock_p, bench_p, n)
+        f = make_features()
+        s_df = f.calculate_relative_strength(s_df, b_df, "COMP")
+        assert "rs_comp_252" in s_df.columns
+        assert s_df["rs_comp_252"].isna().all()
 
     def test_equal_performance_rs_near_zero(self):
         """If stock and benchmark move identically, RS should be near 0."""
@@ -474,6 +518,49 @@ class TestRelativeStrength:
         rs_60 = s_df["rs_comp_60"].iloc[-1]
         # Should be approximately 0.15 (excess return)
         assert rs_60 == pytest.approx(0.15, abs=0.005)
+
+    def test_skip_days_zero_matches_no_skip(self):
+        """skip_days=0 must produce identical results to the default (no arg)."""
+        n = 130
+        stock_p = np.linspace(10, 15, n)
+        bench_p = np.linspace(100, 110, n)
+        s1, b1 = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        s2, b2 = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        f = make_features()
+        r1 = f.calculate_relative_strength(s1, b1, "COMP", skip_days=0)
+        r2 = f.calculate_relative_strength(s2, b2, "COMP")
+        pd.testing.assert_series_equal(r1["rs_comp_60"], r2["rs_comp_60"])
+
+    def test_skip_days_excludes_recent_surge(self):
+        """
+        When the stock surges only in the final 5 bars, skip_days=5 should
+        produce a lower rs_comp_60 than skip_days=0 because the surge is
+        excluded from the measurement window.
+        """
+        n = 200
+        # flat benchmark; stock flat then jumps only in the last 5 bars
+        bench_p = np.ones(n) * 100.0
+        stock_p = np.concatenate([np.ones(195) * 10.0, np.linspace(10.0, 14.0, 5)])
+        s_no_skip, b_no_skip = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        s_skip, b_skip = self._aligned_pair(stock_p.copy(), bench_p.copy(), n)
+        f = make_features()
+        r_no_skip = f.calculate_relative_strength(s_no_skip, b_no_skip, "COMP", skip_days=0)
+        r_skip = f.calculate_relative_strength(s_skip, b_skip, "COMP", skip_days=5)
+        rs_no_skip = r_no_skip["rs_comp_60"].iloc[-1]
+        rs_skip = r_skip["rs_comp_60"].iloc[-1]
+        # skip excludes the final surge — skip value should be lower
+        assert rs_skip < rs_no_skip
+
+    def test_skip_days_columns_still_created(self):
+        """skip_days > 0 must still produce all four rs_comp_* columns."""
+        n = 130
+        stock_p = np.linspace(10, 15, n)
+        bench_p = np.linspace(100, 110, n)
+        s_df, b_df = self._aligned_pair(stock_p, bench_p, n)
+        f = make_features()
+        s_df = f.calculate_relative_strength(s_df, b_df, "COMP", skip_days=5)
+        for period in [20, 60, 120, 252]:
+            assert f"rs_comp_{period}" in s_df.columns
 
 
 # ===========================================================================
@@ -785,7 +872,7 @@ class TestAddAllFeatures:
         # Range / consolidation
         "adr_pct", "daily_range_pct", "breakout_level", "close_range_position",
         # 52-week proximity
-        "52wk_high", "pct_from_52wk_high",
+        "52wk_high", "pct_from_52wk_high", "approaching_annual_high",
         # VCP — range_10 used in tightness scoring
         "vcp_contracting", "vcp_contraction_ratio", "range_10", "vcp_contraction_count",
         # Wedge geometry — used in score_base_quality wedge component
@@ -802,6 +889,8 @@ class TestAddAllFeatures:
         "weekly_aligned",
         # Prior move
         "prior_move_pct", "is_power_move",
+        # TSMOM absolute return windows (MOP2012)
+        "abs_return_63d", "abs_return_126d",
         # Risk
         "stop_level", "stop_distance_pct", "potential_r",
     ]
@@ -818,14 +907,14 @@ class TestAddAllFeatures:
         df = make_ohlcv(260, start_price=10.0, end_price=50.0)
         bench = make_ohlcv(260, start_price=100.0, end_price=130.0)
         result = f.add_all_features(df, benchmark_df=bench)
-        for period in [20, 60, 120]:
+        for period in [20, 60, 120, 252]:
             assert f"rs_comp_{period}" in result.columns
 
     def test_rs_columns_absent_without_benchmark(self):
         f = make_features()
         df = make_ohlcv(260)
         result = f.add_all_features(df, benchmark_df=None)
-        for period in [20, 60, 120]:
+        for period in [20, 60, 120, 252]:
             assert f"rs_comp_{period}" not in result.columns
 
     def test_no_exceptions_on_short_history(self):

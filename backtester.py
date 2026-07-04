@@ -88,6 +88,11 @@ class BacktestParams:
     # protects against binary events (FDA, earnings, fraud) on high-ADR stocks.
     # set to None to disable (raw gap fills, which produced -22R single trades historically).
     max_loss_r: Optional[float] = 5.0
+    # execution cost sensitivity: widens every fill against the position by this
+    # many basis points (entries up, exits down). isolates how much of the edge
+    # is fill-model artifact vs real, since breakout-day entries are exactly the
+    # high-attention, gappy fills that get worse execution in practice.
+    slippage_bps: float = 0.0
 
 
 # ── trade record ──────────────────────────────────────────────────────────────
@@ -426,16 +431,34 @@ class BacktestResults:
 # ── backtester ────────────────────────────────────────────────────────────────
 
 class Backtester:
-    def __init__(self, params: BacktestParams | None = None):
+    def __init__(self, params: BacktestParams | None = None, scans_override: pd.DataFrame | None = None):
         self.params = params or BacktestParams()
         self._price_cache: dict[str, pd.DataFrame] = {}
+        # for testing alternate hard-filter thresholds: caller supplies a scans-shaped
+        # dataframe already gated on the custom filter logic (passes_filters ignored),
+        # pre-sorted scan_date asc / score desc. run() still applies start_date/end_date/
+        # min_score/max_score/min_regime the same way it would against a live DB query,
+        # so the same override frame can be reused across many purged-fold date ranges.
+        self._scans_override = scans_override
 
     # ── data loading ──────────────────────────────────────────────────────────
 
     def _load_scans(self) -> pd.DataFrame:
+        p = self.params
+        if self._scans_override is not None:
+            df = self._scans_override
+            score_col = "raw_score" if p.score_col == "raw_score" else "score"
+            m = (df["scan_date"] >= p.start_date) & (df["scan_date"] <= p.end_date)
+            m &= df["_filter_score"] >= p.min_score
+            if p.max_score is not None:
+                m &= df["_filter_score"] <= p.max_score
+            if p.min_regime and p.min_regime in _REGIME_ORDER:
+                allowed = _REGIME_ORDER[_REGIME_ORDER.index(p.min_regime):]
+                m &= df["regime"].isin(allowed) | df["regime"].isna()
+            return df[m].copy()
+
         if not DB_PATH.exists():
             raise FileNotFoundError(f"database not found: {DB_PATH}")
-        p = self.params
         if p.score_col == "raw_score":
             score_expr = "COALESCE(s.raw_score, s.score / NULLIF(mc.regime_multiplier, 0))"
         else:
@@ -524,7 +547,7 @@ class Backtester:
             if after.empty:
                 return None
             r = after.iloc[0]
-            entry_price  = float(r["open"])
+            entry_price  = float(r["open"]) * (1 + p.slippage_bps / 10_000)
             initial_stop = float(r["low"])
             # ensure minimum 2% stop distance — a near-doji entry day (low ≈ open)
             # produces near-zero risk_per_share, inflating share count catastrophically
@@ -541,7 +564,7 @@ class Backtester:
             if after.empty:
                 return None
             r = after.iloc[0]
-            return r["ds"], float(r["open"]), float(r["low"])
+            return r["ds"], float(r["open"]) * (1 + p.slippage_bps / 10_000), float(r["low"])
 
         window = prices[prices["ds"] > scan_date].head(p.breakout_window)
         for _, r in window.iterrows():
@@ -549,9 +572,9 @@ class Backtester:
                 nxt = prices[prices["ds"] > r["ds"]]
                 if nxt.empty:
                     # enter at breakout day close if no next bar
-                    return r["ds"], float(r["close"]), float(r["low"])
+                    return r["ds"], float(r["close"]) * (1 + p.slippage_bps / 10_000), float(r["low"])
                 nr = nxt.iloc[0]
-                entry_price  = float(nr["open"])
+                entry_price  = float(nr["open"]) * (1 + p.slippage_bps / 10_000)
                 initial_stop = float(nr["low"])
                 min_stop_dist = entry_price * 0.02
                 if entry_price - initial_stop < min_stop_dist:
@@ -605,6 +628,7 @@ class Backtester:
         if lo <= pos.current_stop:
             # gap-down: if open is already below stop, fill is at open
             fill = pos.current_stop if op >= pos.current_stop else op
+            fill *= 1 - p.slippage_bps / 10_000
             # cap catastrophic gap fills — binary events on high-ADR stocks can produce
             # -20R+ losses in a single bar; cap at max_loss_r to reflect real risk mgmt
             if p.max_loss_r and risk_per_share > 0:
@@ -625,12 +649,12 @@ class Backtester:
                 trim1_shares = math.floor(t.shares / 3)
                 if trim1_shares > 0:
                     t.trim1_date   = ds
-                    t.trim1_price  = trim1_target
+                    t.trim1_price  = trim1_target * (1 - p.slippage_bps / 10_000)
                     t.trim1_shares = float(trim1_shares)
                     pos.shares_remaining -= trim1_shares
                     pos.current_stop = t.entry_price  # breakeven stop
                     pos.trim1_done   = True
-                    cash_out += trim1_target * trim1_shares
+                    cash_out += t.trim1_price * trim1_shares
 
         # ── 3. TRIM 2 CHECK (sell another 1/3 at trim2_r × R, optional) ──────
         if p.trim2_enabled and pos.trim1_done and not pos.trim2_done and risk_per_share > 0:
@@ -639,31 +663,33 @@ class Backtester:
                 trim2_shares = math.floor(t.shares / 3)
                 if trim2_shares > 0 and trim2_shares <= pos.shares_remaining:
                     t.trim2_date   = ds
-                    t.trim2_price  = trim2_target
+                    t.trim2_price  = trim2_target * (1 - p.slippage_bps / 10_000)
                     t.trim2_shares = float(trim2_shares)
                     pos.shares_remaining -= trim2_shares
                     pos.trim2_done = True
-                    cash_out += trim2_target * trim2_shares
+                    cash_out += t.trim2_price * trim2_shares
 
         # ── 4. TRAILING STOP (close < SMA, only after breakeven) ─────────────
         # qullamaggie: once you've trimmed once and set stop to breakeven,
         # let the remaining position run until a close below the 10-day SMA
         if pos.trim1_done and not math.isnan(sma) and cl < sma:
+            fill = cl * (1 - p.slippage_bps / 10_000)
             t.exit_date   = ds
-            t.exit_price  = cl
+            t.exit_price  = fill
             t.exit_shares = pos.shares_remaining
             t.exit_reason = "trail_sma10"
-            cash_out += cl * pos.shares_remaining
+            cash_out += fill * pos.shares_remaining
             pos.shares_remaining = 0
             return cash_out, True
 
         # ── 5. SAFETY VALVE (max hold days) ───────────────────────────────────
         if pos.hold_count >= p.max_hold_days:
+            fill = cl * (1 - p.slippage_bps / 10_000)
             t.exit_date   = ds
-            t.exit_price  = cl
+            t.exit_price  = fill
             t.exit_shares = pos.shares_remaining
             t.exit_reason = "time"
-            cash_out += cl * pos.shares_remaining
+            cash_out += fill * pos.shares_remaining
             pos.shares_remaining = 0
             return cash_out, True
 
@@ -1353,6 +1379,8 @@ if __name__ == "__main__":
         help="minimum consol_days required; 0 disables (includes pre-605 non-base records)")
     parser.add_argument("--max-loss-r", type=float, default=5.0,
         help="cap single-trade loss at N×R regardless of gap fill; 0 disables")
+    parser.add_argument("--slippage-bps", type=float, default=0.0,
+        help="widen every fill against the position by N basis points (entries up, exits down)")
     parser.add_argument("--csv", metavar="FILE",
         help="save output to CSV (trade log for 'trade' mode, signal data for 'signal' mode)")
     parser.add_argument(
@@ -1385,6 +1413,7 @@ if __name__ == "__main__":
         min_regime        = args.min_regime,
         min_consol_days   = args.min_consol_days,
         max_loss_r        = args.max_loss_r or None,
+        slippage_bps      = args.slippage_bps,
     )
 
     if args.mode in ("signal", "both"):

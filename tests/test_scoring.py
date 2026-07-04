@@ -83,6 +83,10 @@ def make_row(**overrides) -> pd.Series:
         "is_trigger_bar": False,        # trigger bar bonus: off by default
         "obv_trend": False,             # OBV accumulation bonus: off by default
         "weekly_aligned": True,         # weekly alignment: True = no penalty
+        "approaching_annual_high": False,  # GH2004 anchoring alpha: off by default
+        "analyst_coverage": None,       # HLS2000 coverage adj: None = unknown, no adjustment
+        "abs_return_63d": 0.20,         # MOP2012 TSMOM: positive 3M return, no penalty
+        "abs_return_126d": 0.40,        # MOP2012 TSMOM: positive 6M return
         # --- Volume ---
         "dollar_volume": 50_000_000,    # $50M
         "volume_declining": True,
@@ -91,7 +95,9 @@ def make_row(**overrides) -> pd.Series:
         "relative_volume": 0.80,
         "volume_sma_20": 500_000,
         "close_range_position": 0.50,   # mid-range close — demand bonus threshold is 0.70
+        "volume_vs_6m_avg": 0.50,       # LS2000: 50% of 1-year avg — genuinely quiet base (no penalty)
         # --- Relative strength ---
+        "rs_comp_252": 0.10,           # 10% 12-month excess return — passes rs_252 filter
         "rs_comp_120": 0.15,
         "rs_comp_60":  0.12,
         # --- Risk / reward ---
@@ -110,15 +116,15 @@ def make_ideal_row() -> pd.Series:
     Row engineered to achieve the maximum possible raw score of 100.
 
     Component maxima (2026-06: 52wk proximity removed as anti-predictive; base_length peak at 35-60d):
-      base_quality       6 + 4 + 4 + 6  = 20   (tightness+length+VCP+wedge; trigger capped at 20)
-      trend_strength     4 + 8          = 12   (MA+prior_move; stage2 removed 2026-06 as anti-predictive)
-      relative_strength  12 + 8 + 10    = 30   (60d primary 12pts, 120d secondary 8pts, rank 10pts)
-      volume_profile     6 + 14 + 10    = 30   (adr 12-15% required for 10pts; peak EV=0.429)
+      base_quality       6 + 4 + 4 + 6      = 20   (tightness+length+VCP+wedge; trigger capped at 20)
+      trend_strength     4 + 8 + 2          = 14   (MA+prior_move+approaching_annual_high; GH2004)
+      relative_strength  12 + 8 + 10        = 30   (60d primary 12pts, 120d secondary 8pts, rank 10pts)
+      volume_profile     6 + 14 + 10        = 30   (adr 12-15% required for 10pts; peak EV=0.429)
       risk_reward        0 (excluded from scoring)
 
     Normalization: (raw/sub_max)*weight
       base:   (20/20)*10 = 10
-      trend:  (12/12)*15 = 15
+      trend:  (14/14)*15 = 15
       rs:     (30/30)*25 = 25
       volume: (30/30)*50 = 50
       TOTAL               = 100
@@ -134,13 +140,14 @@ def make_ideal_row() -> pd.Series:
         swing_low_count=3,                # wedge: hl >= 2
         swing_high_count=3,               # wedge: lh >= 2 → wedge = 6
         is_trigger_bar=False,             # trigger bar: capped at 20, no extra needed
-        # trend_strength -> 12 (4+8; stage2 removed 2026-06 as anti-predictive)
+        # trend_strength -> 14 (4+8+2; approaching_annual_high: GH2004)
         ma_alignment=True,
         mas_rising=True,
         distance_from_sma10=0.02,
         ema10_surf_ratio=0.80,            # surf_ratio >= 0.75 + aligned + rising = 4
         prior_move_pct=2.5,
         days_since_power_move=30,         # 200%+ within 60d → power_move = 8
+        approaching_annual_high=True,     # -3% to -15% from 52wk high → +2 pts (GH2004)
         weekly_aligned=True,              # no weekly penalty
         # relative_strength -> 30 (rs_rank handled via score call; use rs_rank=90)
         rs_comp_60=0.55,                  # rs_60 = 12 (>=0.50, primary signal 2026-06)
@@ -155,6 +162,8 @@ def make_ideal_row() -> pd.Series:
         stop_distance_pct=0.06,
         potential_r=6.0,
     )
+
+
 
 
 # ===========================================================================
@@ -459,12 +468,25 @@ class TestScoreTrendStrength:
             f"prior_move={prior_move}, days={days_since} -> expected {expected}, got {d['prior_power_move']}"
         )
 
-    def test_max_score_is_12(self):
-        """Ideal trend: perfect MAs + 200%+ flagpole. sub-max=12 (4+8; stage2 removed 2026-06)."""
+    def test_max_score_is_14(self):
+        """Ideal trend: perfect MAs + 200%+ flagpole + approaching annual high. sub-max=14 (4+8+2)."""
         row = make_row(
             ma_alignment=True, mas_rising=True, distance_from_sma10=0.02,
             ema10_surf_ratio=0.80,
             prior_move_pct=2.5, days_since_power_move=30,  # 200%+ → 8 pts
+            approaching_annual_high=True, consol_days=10,   # GH2004 → +2 pts
+            weekly_aligned=True,
+        )
+        score, _ = self.scoring.score_trend_strength(row)
+        assert score == 14.0
+
+    def test_max_score_without_approaching_is_12(self):
+        """Without approaching_annual_high, ideal trend scores 4+8=12."""
+        row = make_row(
+            ma_alignment=True, mas_rising=True, distance_from_sma10=0.02,
+            ema10_surf_ratio=0.80,
+            prior_move_pct=2.5, days_since_power_move=30,
+            approaching_annual_high=False,
             weekly_aligned=True,
         )
         score, _ = self.scoring.score_trend_strength(row)
@@ -511,6 +533,208 @@ class TestScoreTrendStrength:
         score_misaligned, d = self.scoring.score_trend_strength(row)
         assert d["weekly_alignment"] == -5.0
         assert score_misaligned == max(0.0, score_aligned - 5.0)
+
+    # --- 2e. Approaching annual high (George & Hwang 2004) ---
+
+    def test_approaching_annual_high_adds_2pts(self):
+        """approaching_annual_high=True AND consol_days>=10 → +2 pts (GH2004 anchoring alpha)."""
+        row = make_row(
+            approaching_annual_high=True, consol_days=10,
+            ma_alignment=False, mas_rising=False,
+            sma_10=45.0, sma_20=46.0,
+            prior_move_pct=0.0, days_since_power_move=999,
+            weekly_aligned=True,
+        )
+        _, d = self.scoring.score_trend_strength(row)
+        assert d["approaching_annual_high"] == 2.0
+
+    def test_approaching_annual_high_requires_min_consol_days(self):
+        """consol_days < 10 suppresses the GH2004 bonus even when flag is True."""
+        row_short = make_row(approaching_annual_high=True, consol_days=5, weekly_aligned=True)
+        row_long  = make_row(approaching_annual_high=True, consol_days=10, weekly_aligned=True)
+        _, d_short = self.scoring.score_trend_strength(row_short)
+        _, d_long  = self.scoring.score_trend_strength(row_long)
+        assert d_short["approaching_annual_high"] == 0.0
+        assert d_long["approaching_annual_high"]  == 2.0
+
+    def test_approaching_annual_high_off_adds_zero(self):
+        """approaching_annual_high=False → 0 pts regardless of consol_days."""
+        row = make_row(approaching_annual_high=False, consol_days=30, weekly_aligned=True)
+        _, d = self.scoring.score_trend_strength(row)
+        assert d["approaching_annual_high"] == 0.0
+
+    # --- analyst coverage (HLS2000) ---
+
+    def _scoring_with_coverage(self):
+        """Return a Scoring instance with score_analyst_coverage enabled."""
+        from config import PARAMETERS
+        cfg = PARAMETERS.copy()
+        cfg["score_analyst_coverage"] = True
+        s = Scoring(cfg)
+        s.regime_multiplier = 1.0
+        return s
+
+    def test_analyst_coverage_zero_analysts_adds_2pts(self):
+        """0 analysts → +2 pts (fastest information diffusion gap per HLS2000)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=0, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 2.0
+
+    def test_analyst_coverage_1_analyst_adds_1pt(self):
+        """1 analyst → +1 pt."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=1, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 1.0
+
+    def test_analyst_coverage_2_analysts_adds_1pt(self):
+        """2 analysts → +1 pt (still under-covered)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=2, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 1.0
+
+    def test_analyst_coverage_3_to_5_adds_zero(self):
+        """3–5 analysts → 0 pts (neutral tier)."""
+        s = self._scoring_with_coverage()
+        for n in (3, 4, 5):
+            row = make_row(analyst_coverage=n, weekly_aligned=True)
+            _, d = s.score_trend_strength(row)
+            assert d["analyst_coverage"] == 0.0, f"n={n} should give 0 pts"
+
+    def test_analyst_coverage_6plus_subtracts_1pt(self):
+        """6+ analysts → -1 pt (widely-followed stock, momentum already priced in)."""
+        s = self._scoring_with_coverage()
+        for n in (6, 10, 20):
+            row = make_row(analyst_coverage=n, weekly_aligned=True)
+            _, d = s.score_trend_strength(row)
+            assert d["analyst_coverage"] == -1.0, f"n={n} should give -1 pt"
+
+    def test_analyst_coverage_none_skips_adjustment(self):
+        """analyst_coverage=None → 0 adjustment (graceful degradation for missing data)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=None, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 0.0
+
+    def test_analyst_coverage_nan_skips_adjustment(self):
+        """analyst_coverage=NaN → 0 adjustment (same as None, covers stamped np.nan)."""
+        s = self._scoring_with_coverage()
+        row = make_row(analyst_coverage=float("nan"), weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 0.0
+
+    def test_analyst_coverage_flag_off_skips_adjustment(self):
+        """When score_analyst_coverage=False, analyst_coverage is always 0."""
+        from config import PARAMETERS
+        cfg = PARAMETERS.copy()
+        cfg["score_analyst_coverage"] = False
+        s = Scoring(cfg)
+        s.regime_multiplier = 1.0
+        row = make_row(analyst_coverage=0, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["analyst_coverage"] == 0.0
+
+    def test_analyst_coverage_score_floored_at_zero(self):
+        """High-coverage penalty cannot drag score below 0 (floor check)."""
+        s = self._scoring_with_coverage()
+        # minimal trend score: no alignment, no prior move, no GH2004, weekly misaligned
+        row = make_row(
+            ma_alignment=False, mas_rising=False, ema10_surf_ratio=0.0,
+            sma_10=40.0, sma_20=45.0,  # sma_10 < sma_20 → 0 pts MA
+            prior_move_pct=0.75, days_since_power_move=95,  # outside 90d window → 0 pts
+            approaching_annual_high=False,
+            weekly_aligned=False,  # -5 penalty
+            analyst_coverage=10,   # -1 from coverage
+        )
+        score, d = s.score_trend_strength(row)
+        assert score >= 0.0
+
+    # --- TSMOM gate (MOP2012) ---
+
+    def _scoring_with_tsmom(self):
+        """Return a Scoring instance with score_tsmom_gate enabled."""
+        from config import PARAMETERS
+        cfg = PARAMETERS.copy()
+        cfg["score_tsmom_gate"] = True
+        s = Scoring(cfg)
+        s.regime_multiplier = 1.0
+        return s
+
+    def test_tsmom_negative_abs_return_penalises_3pts(self):
+        """abs_return_63d < 0 → -3 pts (stock has given back all 3M gains)."""
+        s = self._scoring_with_tsmom()
+        row_pos = make_row(abs_return_63d= 0.10, weekly_aligned=True)
+        row_neg = make_row(abs_return_63d=-0.05, weekly_aligned=True)
+        score_pos, _ = s.score_trend_strength(row_pos)
+        score_neg, d = s.score_trend_strength(row_neg)
+        assert d["tsmom_gate"] == -3.0
+        assert score_neg == pytest.approx(score_pos - 3.0, abs=0.01)
+
+    def test_tsmom_zero_return_is_not_penalised(self):
+        """abs_return_63d == 0.0 is not negative → no penalty (boundary)."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=0.0, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_positive_return_no_penalty(self):
+        """abs_return_63d > 0 → tsmom_gate = 0."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=0.50, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_none_skips_penalty(self):
+        """abs_return_63d=None → graceful skip, no penalty."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=None, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_nan_skips_penalty(self):
+        """abs_return_63d=NaN → graceful skip (short-history stocks < 63 bars)."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=float("nan"), weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_flag_off_no_penalty_even_when_negative(self):
+        """When score_tsmom_gate=False (default), no penalty regardless of abs_return_63d."""
+        row = make_row(abs_return_63d=-0.50, weekly_aligned=True)
+        _, d = self.scoring.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_penalty_floored_at_zero(self):
+        """TSMOM penalty cannot drag trend score below 0."""
+        s = self._scoring_with_tsmom()
+        # minimum possible score: no MA, no prior move, no GH2004, weekly penalty -5
+        row = make_row(
+            ma_alignment=False, mas_rising=False, ema10_surf_ratio=0.0,
+            sma_10=40.0, sma_20=45.0,
+            prior_move_pct=0.75, days_since_power_move=95,
+            approaching_annual_high=False,
+            weekly_aligned=False,   # -5 pts
+            abs_return_63d=-0.30,   # -3 pts TSMOM
+            analyst_coverage=None,
+        )
+        score, _ = s.score_trend_strength(row)
+        assert score >= 0.0
+
+    def test_trend_score_capped_at_sub_max_14(self):
+        """Upward adjustments (coverage +2) cannot push trend score past 14."""
+        s = self._scoring_with_coverage()
+        # ideal trend: 4+8+2=14, then +2 from analyst_coverage=0
+        row = make_row(
+            ma_alignment=True, mas_rising=True, ema10_surf_ratio=0.80,
+            prior_move_pct=2.5, days_since_power_move=30,
+            approaching_annual_high=True, consol_days=10,
+            weekly_aligned=True,
+            analyst_coverage=0,   # +2 pts → without cap would be 16
+        )
+        score, _ = s.score_trend_strength(row)
+        assert score <= 14.0
 
 
 # ===========================================================================
@@ -786,6 +1010,44 @@ class TestScoreVolumeProfile:
         _, d = self.scoring.score_volume_profile(row)
         assert d["volume_contraction"] == 10.5
 
+    # --- 4e. Lee-Swaminathan (2000) historical volume penalty ---
+
+    def test_ls2000_penalty_fires_when_base_vol_elevated_vs_historical(self):
+        """volume_vs_6m_avg > 0.90 deducts 2 pts — base not structurally quiet."""
+        row_normal = make_row(dollar_volume=0, adr_pct=0.0,
+                              volume_declining=True, volume_dryup_ratio=0.60,
+                              volume_vs_6m_avg=0.50)  # base at 50% of 1yr avg: genuinely quiet
+        row_elevated = make_row(dollar_volume=0, adr_pct=0.0,
+                                volume_declining=True, volume_dryup_ratio=0.60,
+                                volume_vs_6m_avg=0.95)  # base at 95% of 1yr avg: flagpole lull only
+        _, d_normal   = self.scoring.score_volume_profile(row_normal)
+        _, d_elevated = self.scoring.score_volume_profile(row_elevated)
+        assert d_elevated["volume_contraction"] == d_normal["volume_contraction"] - 2.0
+
+    def test_ls2000_penalty_absent_when_base_vol_quiet(self):
+        """volume_vs_6m_avg <= 0.90 leaves vd_score unchanged."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.60,
+                       volume_vs_6m_avg=0.90)  # exactly at threshold: no penalty (strict >)
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 10.5
+
+    def test_ls2000_penalty_floored_at_zero(self):
+        """penalty cannot push vd_score below 0."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=False, volume_dryup_ratio=1.0,
+                       volume_vs_6m_avg=0.95)  # vd_score=0 before penalty → stays at 0
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 0.0
+
+    def test_ls2000_penalty_absent_when_feature_missing(self):
+        """missing volume_vs_6m_avg (None) must not raise and must not penalize."""
+        row = make_row(dollar_volume=0, adr_pct=0.0,
+                       volume_declining=True, volume_dryup_ratio=0.60)
+        row = row.drop("volume_vs_6m_avg")  # simulate pre-feature historical data
+        _, d = self.scoring.score_volume_profile(row)
+        assert d["volume_contraction"] == 10.5  # unpenalized baseline
+
 
 # ===========================================================================
 # 5. SCORE RISK/REWARD
@@ -879,7 +1141,7 @@ class TestScoreRiskReward:
 
 class TestApplyHardFilters:
     """
-    apply_hard_filters() must independently catch each of the 6 conditions.
+    apply_hard_filters() must independently catch each of the 9 conditions.
     A row that fails one filter should still report all other failures.
     """
 
@@ -965,10 +1227,10 @@ class TestApplyHardFilters:
     # --- Filter 4: Minimum ADR ---
 
     @pytest.mark.parametrize("adr, should_pass", [
-        (0.070, True),    # exactly at new minimum (raised from 5% to 7% in 2026-06)
-        (0.069, False),   # just below
+        (0.080, True),    # exactly at new minimum (raised 7%->8% in 2026-07, trade-sim)
+        (0.079, False),   # just below
         (0.100, True),
-        (0.050, False),   # old minimum now fails
+        (0.070, False),   # old 7% minimum now fails
     ])
     def test_filter_adr(self, adr, should_pass):
         row = self._passing_row()
@@ -1126,6 +1388,61 @@ class TestApplyHardFilters:
         assert passes is False
         assert any("Consolidation" in f for f in failures)
 
+    # --- Filter 9: 12-month RS gate (AQR momentum universe, Moskowitz et al. 2012) ---
+
+    def test_filter_rs_252_negative_fails(self):
+        """stock that underperformed NASDAQ over 12M is not a momentum leader."""
+        row = self._passing_row()
+        row["rs_comp_252"] = -0.10
+        passes, failures = self.scoring.apply_hard_filters(row)
+        assert passes is False
+        assert any("12-month RS" in f for f in failures)
+
+    def test_filter_rs_252_positive_passes(self):
+        """stock that outperformed NASDAQ over 12M clears the gate."""
+        row = self._passing_row()
+        row["rs_comp_252"] = 0.05
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_exactly_zero_passes(self):
+        """matching NASDAQ exactly (rs_252=0) is not underperformance."""
+        row = self._passing_row()
+        row["rs_comp_252"] = 0.0
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_missing_skipped(self):
+        """no rs_comp_252 key (< 252 bars of history) → filter silently skipped."""
+        row = self._passing_row()
+        row = row.drop("rs_comp_252", errors="ignore")
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_nan_skipped(self):
+        """NaN rs_comp_252 (insufficient history) → filter silently skipped."""
+        row = self._passing_row()
+        row["rs_comp_252"] = float("nan")
+        passes, failures = self.scoring.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
+    def test_filter_rs_252_disabled_by_config(self):
+        """require_positive_rs_252=False disables the gate entirely."""
+        import copy
+        from config import PARAMETERS
+        cfg = copy.deepcopy(PARAMETERS)
+        cfg["require_positive_rs_252"] = False
+        s = Scoring(cfg)
+        row = self._passing_row()
+        row["rs_comp_252"] = -0.50
+        passes, failures = s.apply_hard_filters(row)
+        rs_failures = [f for f in failures if "12-month RS" in f]
+        assert rs_failures == []
+
 
 # ===========================================================================
 # 7. GRADE AND SIGNAL THRESHOLDS
@@ -1225,7 +1542,7 @@ class TestCalculateTotalScore:
         row = make_ideal_row()
         bd = scoring.calculate_total_score(row, rs_rank=80.0)
         weights = PARAMETERS["weights"]
-        _sub_maxes = {"base_quality": 20.0, "trend_strength": 12.0,
+        _sub_maxes = {"base_quality": 20.0, "trend_strength": 14.0,
                       "relative_strength": 30.0, "volume_profile": 30.0}
         expected = (
             bd.base_quality      / _sub_maxes["base_quality"]      * weights["base_quality"]
@@ -1471,7 +1788,7 @@ class TestScoreDataframe:
         weights = PARAMETERS["weights"]
         # actual max output of each scoring method (denominators in normalization)
         _sub_maxes = {
-            "base_quality": 20.0, "trend_strength": 12.0,
+            "base_quality": 20.0, "trend_strength": 14.0,
             "relative_strength": 30.0, "volume_profile": 30.0,
         }
         for i in range(1, 5):
@@ -1530,7 +1847,7 @@ class TestGoldenSnapshot:
 
         Sub-component maxes (denominators in calculate_total_score normalization):
           base_quality:      6+4+4+6      = 20   (trigger bar capped at 20)
-          trend_strength:    4+8          = 12   (stage2 removed 2026-06: anti-predictive per DB)
+          trend_strength:    4+8+2        = 14   (approaching_annual_high added 2026-06: GH2004)
           relative_strength: 12+8+10      = 30
           volume_profile:    6+14+10      = 30   (OBV bonus capped within vd 14)
 
@@ -1542,7 +1859,7 @@ class TestGoldenSnapshot:
         row = make_ideal_row()
         bd = scoring.calculate_total_score(row, rs_rank=90.0)
         assert bd.base_quality == 20.0
-        assert bd.trend_strength == 12.0
+        assert bd.trend_strength == 14.0
         assert bd.relative_strength == 30.0
         assert bd.volume_profile == 30.0
         assert bd.risk_reward == 0.0
@@ -1559,7 +1876,133 @@ class TestGoldenSnapshot:
         bd = scoring.calculate_total_score(row, rs_rank=90.0)
         # sub-component maxes — the actual upper bound of each scoring method's output
         assert bd.base_quality <= 20.0
-        assert bd.trend_strength <= 12.0
+        assert bd.trend_strength <= 14.0
         assert bd.relative_strength <= 30.0
         assert bd.volume_profile <= 30.0
         assert bd.risk_reward == 0.0
+
+
+# ===========================================================================
+# 11. D&M PANIC STATE — MacroRegimeAnalyzer (Daniel & Moskowitz 2016)
+# ===========================================================================
+
+class TestDMPanicState:
+    """
+    Daniel & Moskowitz (2016): momentum crashes are forecastable when the market
+    has fallen >20% over 24 months AND current vol is ELEVATED/EXTREME.
+    In that panic state the macro multiplier floor drops 0.60 → 0.40.
+
+    Tests cover:
+      - _vol_adjusted_multiplier floor logic directly (unit tests, no data needed)
+      - full analyze() end-to-end: panic vs non-panic synthetic market data
+    """
+
+    from config import PARAMETERS as _params
+
+    def _make_analyzer(self):
+        from macro_regime import MacroRegimeAnalyzer
+        return MacroRegimeAnalyzer(self.config)
+
+    @property
+    def config(self):
+        from config import PARAMETERS
+        return PARAMETERS.copy()
+
+    def _make_ohlcv(self, n: int, drift: float, sigma: float, seed: int = 42) -> pd.DataFrame:
+        """synthetic daily OHLCV with deterministic drift and vol"""
+        rng = np.random.default_rng(seed)
+        returns = rng.normal(drift, sigma, n)
+        prices = 100.0 * np.cumprod(1 + returns)
+        highs = prices * (1 + np.abs(rng.normal(0, sigma / 2, n)))
+        lows = prices * (1 - np.abs(rng.normal(0, sigma / 2, n)))
+        dates = pd.date_range("2020-01-01", periods=n, freq="B")
+        df = pd.DataFrame({
+            "open":   prices * 0.999,
+            "high":   np.maximum(prices, highs),
+            "low":    np.minimum(prices, lows),
+            "close":  prices,
+            "volume": 1_000_000,
+        }, index=dates)
+        return df
+
+    # --- unit: multiplier floor ---
+
+    def test_panic_state_lowers_floor_to_0_40(self):
+        """panic_state=True + EXTREME vol → floor is 0.40, not 0.60"""
+        from macro_regime import MacroRegimeAnalyzer
+        analyzer = MacroRegimeAnalyzer(self.config)
+        # EXTREME vol: vol_60 > 0.28 — pass a sig dict that triggers it
+        sig = {"vol_60": 0.35, "vol_ratio": 1.5, "vol_rising": True}
+        # base_mult 0.60 - 0.10 (extreme) - 0.03 (rising) = 0.47; without panic floor=0.60 → clamps to 0.60
+        # with panic floor=0.40 → result is 0.47
+        result_no_panic = analyzer._vol_adjusted_multiplier(0.60, sig, panic_state=False)
+        result_panic    = analyzer._vol_adjusted_multiplier(0.60, sig, panic_state=True)
+        assert result_no_panic == 0.60, f"non-panic floor should be 0.60, got {result_no_panic}"
+        assert result_panic    == 0.47, f"panic floor 0.40 should allow 0.47, got {result_panic}"
+
+    def test_non_panic_elevated_vol_still_floors_at_0_60(self):
+        """elevated vol without panic state: floor remains 0.60"""
+        from macro_regime import MacroRegimeAnalyzer
+        analyzer = MacroRegimeAnalyzer(self.config)
+        sig = {"vol_60": 0.22, "vol_ratio": 1.4, "vol_rising": False}
+        # base 0.62 (BEAR_CHOP) - 0.04 (elevated) = 0.58; floor=0.60 → result 0.60
+        result = analyzer._vol_adjusted_multiplier(0.62, sig, panic_state=False)
+        assert result == 0.60, f"non-panic floor should clamp to 0.60, got {result}"
+
+    # --- integration: full analyze() ---
+
+    def test_panic_state_true_when_market_down_with_high_vol(self):
+        """declining market (-40% over 2y) + extreme vol → panic_state=True"""
+        from macro_regime import MacroRegimeAnalyzer
+        # drift=-0.001/day ≈ -22% annual; sigma=0.02/day ≈ 32% annual (EXTREME)
+        # over 510 days: expected drawdown ≈ exp(-0.001*504) - 1 ≈ -40%
+        df = self._make_ohlcv(n=510, drift=-0.001, sigma=0.02, seed=7)
+        analyzer = MacroRegimeAnalyzer(self.config)
+        result = analyzer.analyze(df)
+        # verify the conditions are actually met before checking the flag
+        assert result.details.get("market_drawdown_24m", 0) < -0.20, (
+            f"expected drawdown < -20%, got {result.details.get('market_drawdown_24m')}"
+        )
+        assert result.vol_regime in ("ELEVATED", "EXTREME"), (
+            f"expected elevated vol, got {result.vol_regime}"
+        )
+        assert result.panic_state is True
+
+    def test_panic_state_false_when_market_rising_despite_high_vol(self):
+        """rising market (strong drift) + extreme vol → panic_state=False (no drawdown)"""
+        from macro_regime import MacroRegimeAnalyzer
+        # drift=+0.005/day ≈ 120% annual; at 504 bars expected log-return=2.52
+        # sigma=0.02 gives std=0.449 in log space — P(drawdown>20%) ≈ 0 with this drift
+        df = self._make_ohlcv(n=510, drift=+0.005, sigma=0.02, seed=7)
+        analyzer = MacroRegimeAnalyzer(self.config)
+        result = analyzer.analyze(df)
+        assert result.details.get("market_drawdown_24m", 0) > -0.20, (
+            f"rising market should not have >20% drawdown, got {result.details.get('market_drawdown_24m')}"
+        )
+        assert result.panic_state is False
+
+    def test_panic_state_false_when_market_down_but_vol_calm(self):
+        """market down >20% but vol CALM → panic_state=False (D&M requires both conditions)"""
+        from macro_regime import MacroRegimeAnalyzer
+        # drift=-0.001/day; sigma=0.005/day ≈ 7.9% annual (CALM: <12%)
+        df = self._make_ohlcv(n=510, drift=-0.001, sigma=0.005, seed=7)
+        analyzer = MacroRegimeAnalyzer(self.config)
+        result = analyzer.analyze(df)
+        assert result.details.get("market_drawdown_24m", 0) < -0.20, (
+            f"expected drawdown < -20%, got {result.details.get('market_drawdown_24m')}"
+        )
+        assert result.vol_regime in ("CALM", "NORMAL"), (
+            f"expected calm vol, got {result.vol_regime}"
+        )
+        assert result.panic_state is False
+
+    def test_panic_state_floor_respects_config_override(self):
+        """panic_state_floor config key overrides the 0.40 default"""
+        from macro_regime import MacroRegimeAnalyzer
+        cfg = self.config.copy()
+        cfg["panic_state_floor"] = 0.35
+        analyzer = MacroRegimeAnalyzer(cfg)
+        sig = {"vol_60": 0.35, "vol_ratio": 1.5, "vol_rising": True}
+        # base 0.60 - 0.10 - 0.03 = 0.47; custom floor 0.35 → result is 0.47
+        result = analyzer._vol_adjusted_multiplier(0.60, sig, panic_state=True)
+        assert result == 0.47, f"custom floor 0.35 should not clamp 0.47, got {result}"
