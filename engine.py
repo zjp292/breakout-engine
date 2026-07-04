@@ -49,7 +49,7 @@ def _get_days_to_earnings(symbol: str, as_of_date_str: str) -> Optional[int]:
         dates = []
         if isinstance(cal, dict):
             raw = cal.get("Earnings Date") or cal.get("earningsDate") or []
-            for d in (raw if isinstance(raw, list) else [raw]):
+            for d in raw if isinstance(raw, list) else [raw]:
                 try:
                     dates.append(pd.Timestamp(d))
                 except Exception:
@@ -524,7 +524,9 @@ class Engine:
             print(f"Fetching analyst coverage for {len(all_symbols)} symbols...")
             coverage_map = self._fetch_analyst_coverage_batch(all_symbols)
             n_with_coverage = sum(1 for v in coverage_map.values() if v is not None)
-            print(f"  Coverage data found for {n_with_coverage}/{len(all_symbols)} symbols")
+            print(
+                f"  Coverage data found for {n_with_coverage}/{len(all_symbols)} symbols"
+            )
         print()
 
         # Dictionary to store feature dataframes (scored after market condition)
@@ -785,7 +787,11 @@ class Features:
         # elevated. a ratio > 0.90 means the "quiet" base is still near its own long-run
         # norm — not genuine accumulation, just a lull after the flagpole.
         hist_window = self.config.get("volume_historical_avg_window", 252)
-        hist_avg = df["volume"].rolling(window=hist_window, min_periods=hist_window // 2).mean()
+        hist_avg = (
+            df["volume"]
+            .rolling(window=hist_window, min_periods=hist_window // 2)
+            .mean()
+        )
         df["volume_vs_6m_avg"] = recent_vol / hist_avg
 
         return df
@@ -865,7 +871,9 @@ class Features:
 
         return df
 
-    def calculate_relative_strength(self, df, benchmark_df, benchmark_name="SPY", skip_days=0):
+    def calculate_relative_strength(
+        self, df, benchmark_df, benchmark_name="SPY", skip_days=0
+    ):
         """
         Calculate relative strength vs benchmark as excess return.
 
@@ -1056,21 +1064,30 @@ class Features:
             x = np.arange(len(s))
             return float(np.polyfit(x, s, 1)[0])
 
-        df["obv_slope"] = df["obv"].rolling(window=base_len, min_periods=10).apply(
-            _slope, raw=True
+        df["obv_slope"] = (
+            df["obv"].rolling(window=base_len, min_periods=10).apply(_slope, raw=True)
         )
 
         # consolidation-aware OBV trend: rising OBV while price is flat/declining.
         # normalize OBV slope by avg daily volume to get a per-share unit.
         # normalize price slope by close to get % per day.
         # accumulation fires when OBV/vol-unit slope > price %/day slope
-        avg_vol = df["volume"].rolling(consol_window, min_periods=5).mean().clip(lower=1)
-        obv_slope_norm = df["obv"].rolling(consol_window, min_periods=5).apply(
-            _slope, raw=True
-        ) / avg_vol
-        price_slope_pct = df["close"].rolling(consol_window, min_periods=5).apply(
-            lambda s: float(np.polyfit(np.arange(len(s)), s, 1)[0]) / max(s[-1], 0.01),
-            raw=True,
+        avg_vol = (
+            df["volume"].rolling(consol_window, min_periods=5).mean().clip(lower=1)
+        )
+        obv_slope_norm = (
+            df["obv"].rolling(consol_window, min_periods=5).apply(_slope, raw=True)
+            / avg_vol
+        )
+        price_slope_pct = (
+            df["close"]
+            .rolling(consol_window, min_periods=5)
+            .apply(
+                lambda s: (
+                    float(np.polyfit(np.arange(len(s)), s, 1)[0]) / max(s[-1], 0.01)
+                ),
+                raw=True,
+            )
         )
         # obv_trend=True when OBV is rising meaningfully faster than price
         # (accumulation) OR when OBV rising and price flat/declining (distribution ended)
@@ -1088,9 +1105,8 @@ class Features:
         window = 20
         range_pct = (df["high"] - df["low"]) / df["close"].clip(lower=0.01)
         df["is_trigger_bar"] = (
-            (range_pct < range_pct.rolling(window, min_periods=5).quantile(0.20))
-            & (df["volume"] < df["volume"].rolling(window, min_periods=5).quantile(0.20))
-        )
+            range_pct < range_pct.rolling(window, min_periods=5).quantile(0.20)
+        ) & (df["volume"] < df["volume"].rolling(window, min_periods=5).quantile(0.20))
         return df
 
     def calculate_weekly_alignment(self, df):
@@ -1113,9 +1129,23 @@ class Features:
         w20 = weekly.ewm(span=20, adjust=False).mean()
         last_close = float(weekly.iloc[-1])
         aligned = bool(
-            (last_close > float(w10.iloc[-1])) and (float(w10.iloc[-1]) > float(w20.iloc[-1]))
+            (last_close > float(w10.iloc[-1]))
+            and (float(w10.iloc[-1]) > float(w20.iloc[-1]))
         )
         df["weekly_aligned"] = aligned
+        return df
+
+    def calculate_tsmom(self, df):
+        """
+        time-series momentum: stock's own absolute N-month return.
+        Moskowitz, Ooi & Pedersen (2012, JFE 104:228) show TSMOM is
+        additive to cross-sectional RS (rs_comp_*) and independently
+        predicts 1-12 month forward returns.
+        abs_return_63d ≈ 3M, abs_return_126d ≈ 6M.
+        NaN fills forward for short histories; scoring silently skips.
+        """
+        df["abs_return_63d"] = df["close"].pct_change(periods=63)
+        df["abs_return_126d"] = df["close"].pct_change(periods=126)
         return df
 
     def calculate_52wk_proximity(self, df):
@@ -1132,9 +1162,8 @@ class Features:
         # further gains when a stock approaches it for the first time after consolidation.
         # alpha is strongest in the -15% to -3% zone (approaching but not yet extended).
         # stocks already above -3% (extended) or below -15% (deep base) are excluded.
-        df["approaching_annual_high"] = (
-            (df["pct_from_52wk_high"] > -0.15) &
-            (df["pct_from_52wk_high"] < -0.03)
+        df["approaching_annual_high"] = (df["pct_from_52wk_high"] > -0.15) & (
+            df["pct_from_52wk_high"] < -0.03
         )
         return df
 
@@ -1159,9 +1188,9 @@ class Features:
                 - lo.rolling(w_short).min().shift(shift_bars)
             ) / c
 
-        range_now  = range_short
+        range_now = range_short
         range_prev = _nonoverlap_range(w_short)
-        range_far  = _nonoverlap_range(w_short * 2)
+        range_far = _nonoverlap_range(w_short * 2)
         range_vfar = _nonoverlap_range(w_short * 3)
 
         # consecutive contraction count: each step narrower than the one before.
@@ -1170,7 +1199,11 @@ class Features:
         # c3: third contraction (far vs vfar)   — only meaningful if c1+c2 are True
         c1 = (range_now < range_prev).astype(int)
         c2 = ((range_prev < range_far) & (range_now < range_prev)).astype(int)
-        c3 = ((range_far < range_vfar) & (range_prev < range_far) & (range_now < range_prev)).astype(int)
+        c3 = (
+            (range_far < range_vfar)
+            & (range_prev < range_far)
+            & (range_now < range_prev)
+        ).astype(int)
         df["vcp_contraction_count"] = c1 + c2 + c3
 
         # boolean flag: True when at least 2 consecutive contractions confirmed
@@ -1295,6 +1328,10 @@ class Features:
         # Weekly trend alignment filter
         df = self.calculate_weekly_alignment(df)
 
+        # time-series momentum (Moskowitz, Ooi & Pedersen 2012, JFE 104:228)
+        # stock's own absolute N-month return — additive to cross-sectional RS
+        df = self.calculate_tsmom(df)
+
         df = self.calculate_stop(df)
         df = self.calculate_rr(df)
 
@@ -1409,15 +1446,15 @@ class Scoring:
         consol_days = row.get("consol_days", 0)
 
         if 35 <= consol_days <= 60:
-            length_score = 4.0   # optimal: mature, well-formed base
+            length_score = 4.0  # optimal: mature, well-formed base
         elif 20 <= consol_days < 35:
-            length_score = 3.5   # very good
+            length_score = 3.5  # very good
         elif 10 <= consol_days < 20:
-            length_score = 3.0   # normal flag
+            length_score = 3.0  # normal flag
         elif 5 <= consol_days < 10:
-            length_score = 2.5   # short flag
+            length_score = 2.5  # short flag
         elif consol_days > 60:
-            length_score = 1.0   # too long — base stalls out
+            length_score = 1.0  # too long — base stalls out
         else:
             length_score = 0.0
 
@@ -1548,13 +1585,15 @@ class Scoring:
         prior_move = row.get("prior_move_pct", 0.0)
         days_since_move = row.get("days_since_power_move", 999)
 
-        if prior_move >= 2.0 and days_since_move <= 60:     # 200%+ flagpole
+        if prior_move >= 2.0 and days_since_move <= 60:  # 200%+ flagpole
             power_score = 8.0
-        elif prior_move >= 1.0 and days_since_move <= 60:   # 100-200%
+        elif prior_move >= 1.0 and days_since_move <= 60:  # 100-200%
             power_score = 7.0
         elif prior_move >= 0.75 and days_since_move <= 60:  # 75-100%
             power_score = 5.5
-        elif prior_move >= 0.75 and days_since_move <= 90:  # 75%+ outside 60d window (filter minimum)
+        elif (
+            prior_move >= 0.75 and days_since_move <= 90
+        ):  # 75%+ outside 60d window (filter minimum)
             power_score = 4.0
         else:
             power_score = 0.0
@@ -1584,7 +1623,22 @@ class Scoring:
         else:
             details["weekly_alignment"] = 0.0
 
-        # 7. ANALYST COVERAGE ADJUSTMENT (hong, lim & stein 2000, JF 55:265)
+        # 7. TSMOM GATE (Moskowitz, Ooi & Pedersen 2012, JFE 104:228)
+        # stock's own absolute 3-month return < 0 means it has fully given back its
+        # gains — negative TSMOM is the weakest momentum bin and highest crash-risk
+        # cohort (Barroso & Santa-Clara 2015 confirm). penalty -3 pts, floored at 0.
+        # gated on score_tsmom_gate config flag; None/NaN = graceful skip.
+        details["tsmom_gate"] = 0.0
+        if self.config.get("score_tsmom_gate", False):
+            abs_63d = row.get("abs_return_63d")
+            if abs_63d is not None and not (
+                isinstance(abs_63d, float) and np.isnan(abs_63d)
+            ):
+                if float(abs_63d) < 0.0:
+                    score = max(0.0, score - 3.0)
+                    details["tsmom_gate"] = -3.0
+
+        # 8. ANALYST COVERAGE ADJUSTMENT (hong, lim & stein 2000, JF 55:265)
         # information diffuses more slowly through under-covered stocks → longer
         # underreaction window → stronger and more persistent momentum.
         # 0 analysts → +2 pts | 1-2 → +1 pt | 3-5 → 0 pts | 6+ → -1 pt
@@ -1607,7 +1661,9 @@ class Scoring:
                 score = max(0.0, score + coverage_adj)
                 details["analyst_coverage"] = coverage_adj
 
-        return score, details
+        # cap at sub-max so adjustments (analyst coverage +2, etc.) can't inflate
+        # the normalized contribution above the allocated config weight
+        return min(score, 14.0), details
 
     # ============================================
     # RELATIVE STRENGTH SCORING (0-30 points)
@@ -1645,7 +1701,7 @@ class Scoring:
         # 60d window captures the recent flagpole cleanly for a 10-30d base.
         rs_60 = row.get("rs_comp_60", 0.0)
 
-        if rs_60 >= 0.50:     # top quartile in filter-passing cohort (EV=0.303)
+        if rs_60 >= 0.50:  # top quartile in filter-passing cohort (EV=0.303)
             rs_60_score = 12.0
         elif rs_60 >= 0.25:
             rs_60_score = 9.0
@@ -1781,7 +1837,11 @@ class Scoring:
             # just quiet relative to the flagpole spike. genuine accumulation has base
             # vol well below the stock's own historical norm.
             vol_vs_hist = row.get("volume_vs_6m_avg", None)
-            if vol_vs_hist is not None and not np.isnan(vol_vs_hist) and vol_vs_hist > 0.90:
+            if (
+                vol_vs_hist is not None
+                and not np.isnan(vol_vs_hist)
+                and vol_vs_hist > 0.90
+            ):
                 vd_score = max(0.0, vd_score - 2.0)
         else:
             vd_score = 0.0
@@ -1797,15 +1857,15 @@ class Scoring:
 
         # DB EV analysis (n=9686, prior>=75% subset): 12-15% EV=0.429 (peak),
         # 15-20% EV=0.378, 10-12% EV=0.331, 7-10% EV=0.213, 20-25% EV=0.222, 25%+ EV=0.055
-        if adr_pct >= 0.12 and adr_pct < 0.15:     # peak: EV=0.429
+        if adr_pct >= 0.12 and adr_pct < 0.15:  # peak: EV=0.429
             adr_score = 10.0
         elif adr_pct >= 0.15 and adr_pct <= 0.20:  # still great: EV=0.378
             adr_score = 9.0
-        elif adr_pct > 0.20 and adr_pct < 0.25:    # above peak, decent: EV=0.222
+        elif adr_pct > 0.20 and adr_pct < 0.25:  # above peak, decent: EV=0.222
             adr_score = 5.5
-        elif adr_pct >= 0.25:                       # very high vol, poor EV=0.055
+        elif adr_pct >= 0.25:  # very high vol, poor EV=0.055
             adr_score = 2.0
-        elif adr_pct >= 0.10:                       # good: EV=0.331
+        elif adr_pct >= 0.10:  # good: EV=0.331
             adr_score = 7.5
         elif adr_pct >= 0.08:
             adr_score = 5.0

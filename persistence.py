@@ -34,6 +34,8 @@ class ScanPersistence:
     def _connect(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
     def _init_db(self) -> None:
@@ -62,6 +64,7 @@ class ScanPersistence:
                     stop_level              REAL,
                     target_level            REAL,
                     stop_distance_pct       REAL,
+                    stop_distance_20d_pct   REAL,
                     potential_r             REAL,
 
                     -- Base structure
@@ -78,6 +81,7 @@ class ScanPersistence:
                     rs_comp_20              REAL,
                     rs_comp_60              REAL,
                     rs_comp_120             REAL,
+                    rs_comp_252             REAL,
 
                     -- Volume / liquidity
                     dollar_volume           REAL,
@@ -187,6 +191,12 @@ class ScanPersistence:
             for table, col, defn in [
                 ("scans",    "raw_score",               "REAL"),
                 ("outcomes", "breakout_day_rel_volume",  "REAL"),
+                # both enforced live (apply_hard_filters) but never persisted before —
+                # rs_comp_252 gates require_positive_rs_252, stop_distance_20d_pct is
+                # what stop_adr_multiple actually checks (stop_distance_pct is the 60d
+                # value, used for display/backtester initial_stop, not the hard filter).
+                ("scans",    "rs_comp_252",             "REAL"),
+                ("scans",    "stop_distance_20d_pct",   "REAL"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -259,6 +269,7 @@ class ScanPersistence:
                 "stop_level":              self._safe_float(row, "stop_level"),
                 "target_level":            self._safe_float(row, "target_level"),
                 "stop_distance_pct":       self._safe_float(row, "stop_distance_pct"),
+                "stop_distance_20d_pct":   self._safe_float(row, "stop_distance_20d_pct"),
                 "potential_r":             self._safe_float(row, "potential_r"),
                 # Base structure
                 "consol_days":             self._safe_int(row,  "consol_days"),
@@ -273,6 +284,7 @@ class ScanPersistence:
                 "rs_comp_20":              self._safe_float(row, "rs_comp_20"),
                 "rs_comp_60":              self._safe_float(row, "rs_comp_60"),
                 "rs_comp_120":             self._safe_float(row, "rs_comp_120"),
+                "rs_comp_252":             self._safe_float(row, "rs_comp_252"),
                 # Volume
                 "dollar_volume":           self._safe_float(row, "dollar_volume"),
                 "adr_pct":                 self._safe_float(row, "adr_pct"),
@@ -294,11 +306,11 @@ class ScanPersistence:
                     base_quality, trend_strength, relative_strength_score,
                     volume_score, rr_score,
                     price, breakout_level, stop_level, target_level,
-                    stop_distance_pct, potential_r,
+                    stop_distance_pct, stop_distance_20d_pct, potential_r,
                     consol_days, consol_range_pct,
                     vcp_contracting, vcp_contraction_ratio,
                     stage2, pct_from_52wk_high, ma_alignment, prior_move_pct,
-                    rs_comp_20, rs_comp_60, rs_comp_120,
+                    rs_comp_20, rs_comp_60, rs_comp_120, rs_comp_252,
                     dollar_volume, adr_pct, volume_dryup_ratio,
                     market_regime, market_score, regime_multiplier
                 ) VALUES (
@@ -307,11 +319,11 @@ class ScanPersistence:
                     :base_quality, :trend_strength, :relative_strength_score,
                     :volume_score, :rr_score,
                     :price, :breakout_level, :stop_level, :target_level,
-                    :stop_distance_pct, :potential_r,
+                    :stop_distance_pct, :stop_distance_20d_pct, :potential_r,
                     :consol_days, :consol_range_pct,
                     :vcp_contracting, :vcp_contraction_ratio,
                     :stage2, :pct_from_52wk_high, :ma_alignment, :prior_move_pct,
-                    :rs_comp_20, :rs_comp_60, :rs_comp_120,
+                    :rs_comp_20, :rs_comp_60, :rs_comp_120, :rs_comp_252,
                     :dollar_volume, :adr_pct, :volume_dryup_ratio,
                     :market_regime, :market_score, :regime_multiplier
                 )

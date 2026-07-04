@@ -85,6 +85,8 @@ def make_row(**overrides) -> pd.Series:
         "weekly_aligned": True,         # weekly alignment: True = no penalty
         "approaching_annual_high": False,  # GH2004 anchoring alpha: off by default
         "analyst_coverage": None,       # HLS2000 coverage adj: None = unknown, no adjustment
+        "abs_return_63d": 0.20,         # MOP2012 TSMOM: positive 3M return, no penalty
+        "abs_return_126d": 0.40,        # MOP2012 TSMOM: positive 6M return
         # --- Volume ---
         "dollar_volume": 50_000_000,    # $50M
         "volume_declining": True,
@@ -160,6 +162,8 @@ def make_ideal_row() -> pd.Series:
         stop_distance_pct=0.06,
         potential_r=6.0,
     )
+
+
 
 
 # ===========================================================================
@@ -622,9 +626,14 @@ class TestScoreTrendStrength:
         assert d["analyst_coverage"] == 0.0
 
     def test_analyst_coverage_flag_off_skips_adjustment(self):
-        """When score_analyst_coverage=False (default), analyst_coverage is always 0."""
+        """When score_analyst_coverage=False, analyst_coverage is always 0."""
+        from config import PARAMETERS
+        cfg = PARAMETERS.copy()
+        cfg["score_analyst_coverage"] = False
+        s = Scoring(cfg)
+        s.regime_multiplier = 1.0
         row = make_row(analyst_coverage=0, weekly_aligned=True)
-        _, d = self.scoring.score_trend_strength(row)
+        _, d = s.score_trend_strength(row)
         assert d["analyst_coverage"] == 0.0
 
     def test_analyst_coverage_score_floored_at_zero(self):
@@ -641,6 +650,91 @@ class TestScoreTrendStrength:
         )
         score, d = s.score_trend_strength(row)
         assert score >= 0.0
+
+    # --- TSMOM gate (MOP2012) ---
+
+    def _scoring_with_tsmom(self):
+        """Return a Scoring instance with score_tsmom_gate enabled."""
+        from config import PARAMETERS
+        cfg = PARAMETERS.copy()
+        cfg["score_tsmom_gate"] = True
+        s = Scoring(cfg)
+        s.regime_multiplier = 1.0
+        return s
+
+    def test_tsmom_negative_abs_return_penalises_3pts(self):
+        """abs_return_63d < 0 → -3 pts (stock has given back all 3M gains)."""
+        s = self._scoring_with_tsmom()
+        row_pos = make_row(abs_return_63d= 0.10, weekly_aligned=True)
+        row_neg = make_row(abs_return_63d=-0.05, weekly_aligned=True)
+        score_pos, _ = s.score_trend_strength(row_pos)
+        score_neg, d = s.score_trend_strength(row_neg)
+        assert d["tsmom_gate"] == -3.0
+        assert score_neg == pytest.approx(score_pos - 3.0, abs=0.01)
+
+    def test_tsmom_zero_return_is_not_penalised(self):
+        """abs_return_63d == 0.0 is not negative → no penalty (boundary)."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=0.0, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_positive_return_no_penalty(self):
+        """abs_return_63d > 0 → tsmom_gate = 0."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=0.50, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_none_skips_penalty(self):
+        """abs_return_63d=None → graceful skip, no penalty."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=None, weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_nan_skips_penalty(self):
+        """abs_return_63d=NaN → graceful skip (short-history stocks < 63 bars)."""
+        s = self._scoring_with_tsmom()
+        row = make_row(abs_return_63d=float("nan"), weekly_aligned=True)
+        _, d = s.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_flag_off_no_penalty_even_when_negative(self):
+        """When score_tsmom_gate=False (default), no penalty regardless of abs_return_63d."""
+        row = make_row(abs_return_63d=-0.50, weekly_aligned=True)
+        _, d = self.scoring.score_trend_strength(row)
+        assert d["tsmom_gate"] == 0.0
+
+    def test_tsmom_penalty_floored_at_zero(self):
+        """TSMOM penalty cannot drag trend score below 0."""
+        s = self._scoring_with_tsmom()
+        # minimum possible score: no MA, no prior move, no GH2004, weekly penalty -5
+        row = make_row(
+            ma_alignment=False, mas_rising=False, ema10_surf_ratio=0.0,
+            sma_10=40.0, sma_20=45.0,
+            prior_move_pct=0.75, days_since_power_move=95,
+            approaching_annual_high=False,
+            weekly_aligned=False,   # -5 pts
+            abs_return_63d=-0.30,   # -3 pts TSMOM
+            analyst_coverage=None,
+        )
+        score, _ = s.score_trend_strength(row)
+        assert score >= 0.0
+
+    def test_trend_score_capped_at_sub_max_14(self):
+        """Upward adjustments (coverage +2) cannot push trend score past 14."""
+        s = self._scoring_with_coverage()
+        # ideal trend: 4+8+2=14, then +2 from analyst_coverage=0
+        row = make_row(
+            ma_alignment=True, mas_rising=True, ema10_surf_ratio=0.80,
+            prior_move_pct=2.5, days_since_power_move=30,
+            approaching_annual_high=True, consol_days=10,
+            weekly_aligned=True,
+            analyst_coverage=0,   # +2 pts → without cap would be 16
+        )
+        score, _ = s.score_trend_strength(row)
+        assert score <= 14.0
 
 
 # ===========================================================================
@@ -1133,10 +1227,10 @@ class TestApplyHardFilters:
     # --- Filter 4: Minimum ADR ---
 
     @pytest.mark.parametrize("adr, should_pass", [
-        (0.070, True),    # exactly at new minimum (raised from 5% to 7% in 2026-06)
-        (0.069, False),   # just below
+        (0.080, True),    # exactly at new minimum (raised 7%->8% in 2026-07, trade-sim)
+        (0.079, False),   # just below
         (0.100, True),
-        (0.050, False),   # old minimum now fails
+        (0.070, False),   # old 7% minimum now fails
     ])
     def test_filter_adr(self, adr, should_pass):
         row = self._passing_row()

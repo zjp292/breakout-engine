@@ -29,7 +29,7 @@ PARAMETERS = {
     "stop_adr_multiple": 5.0,
     # filtering
     "min_price": 5.0,
-    "min_adr_pct": 0.07,
+    "min_adr_pct": 0.08,  # raised 0.07->0.08 (2026-07): trade-sim sweep, best dev+holdout Sortino/Calmar
     "pct_from_52wk_high_max": 0.30,
     "min_prior_move_pct": 0.75,
     "min_consol_days": 5,
@@ -41,13 +41,23 @@ PARAMETERS = {
         "volume_profile": 50,
         "risk_reward": 0,
     },
-    # analyst coverage scoring
+    # analyst coverage scoring (hong, lim & stein 2000) — requires yfinance fetch
     "score_analyst_coverage": True,
+    # tsmom gate (Moskowitz, Ooi & Pedersen 2012) — uses existing price history
+    "score_tsmom_gate": False,
+    # momentum universe vol penalty (Barroso & Santa-Clara 2015) — uses watchlist dfs
+    "score_momentum_universe_vol": True,
     # alert thresholds
     "min_score_alert": 80,
     "min_score_watchlist": 70,
-    # market regime gating
-    "market_regime": True,
+    # market regime gating — disabled 2026-07-02: intent was to avoid trading in
+    # downtrend eras, but the multiplier didn't track realized EV (flat-to-inverted,
+    # worst in the most recent year — filter-passing stocks are already such a
+    # selected population that they hold up regardless of index-level regime) and
+    # a trade-simulation re-test confirmed it hurt realized Sortino/Calmar too, not
+    # just uncalibrated on paper. see experiments.md Phase 4 + regime multiplier
+    # follow-up. re-enable only if a redesigned version earns it back.
+    "market_regime": False,
     "panic_state_floor": 0.40,
     # paper trading
     "paper_trading": {

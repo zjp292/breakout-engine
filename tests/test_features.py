@@ -889,6 +889,8 @@ class TestAddAllFeatures:
         "weekly_aligned",
         # Prior move
         "prior_move_pct", "is_power_move",
+        # TSMOM absolute return windows (MOP2012)
+        "abs_return_63d", "abs_return_126d",
         # Risk
         "stop_level", "stop_distance_pct", "potential_r",
     ]

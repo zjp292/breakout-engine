@@ -293,6 +293,7 @@ def _build_scan_record(date_str: str, symbol: str, row: pd.Series, breakdown, co
         "stop_level":              _safe_float(row.get("stop_level")),
         "target_level":            _safe_float(row.get("target_level")),
         "stop_distance_pct":       _safe_float(row.get("stop_distance_pct")),
+        "stop_distance_20d_pct":   _safe_float(row.get("stop_distance_20d_pct")),
         "potential_r":             _safe_float(row.get("potential_r")),
         "consol_days":             _safe_int(row.get("consol_days")),
         "consol_range_pct":        consol_range,
@@ -305,6 +306,7 @@ def _build_scan_record(date_str: str, symbol: str, row: pd.Series, breakdown, co
         "rs_comp_20":              _safe_float(row.get("rs_comp_20")),
         "rs_comp_60":              _safe_float(row.get("rs_comp_60")),
         "rs_comp_120":             _safe_float(row.get("rs_comp_120")),
+        "rs_comp_252":             _safe_float(row.get("rs_comp_252")),
         "dollar_volume":           _safe_float(row.get("dollar_volume")),
         "adr_pct":                 _safe_float(row.get("adr_pct")),
         "volume_dryup_ratio":      _safe_float(row.get("volume_dryup_ratio")),
@@ -383,16 +385,6 @@ def _compute_outcome(
     }
 
 
-def _existing_scan_dates(db_path: str, symbol: str) -> set[str]:
-    # check ALL records (passing + failing) so re-runs don't re-score already-processed dates
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT scan_date FROM scans WHERE symbol = ?",
-            (symbol,),
-        ).fetchall()
-    return {r[0] for r in rows}
-
-
 def _write_records(db_path: str, scan_records: list, outcome_records: list):
     with sqlite3.connect(db_path) as conn:
         if scan_records:
@@ -403,11 +395,11 @@ def _write_records(db_path: str, scan_records: list, outcome_records: list):
                     base_quality, trend_strength, relative_strength_score,
                     volume_score, rr_score,
                     price, breakout_level, stop_level, target_level,
-                    stop_distance_pct, potential_r,
+                    stop_distance_pct, stop_distance_20d_pct, potential_r,
                     consol_days, consol_range_pct,
                     vcp_contracting, vcp_contraction_ratio,
                     stage2, pct_from_52wk_high, ma_alignment, prior_move_pct,
-                    rs_comp_20, rs_comp_60, rs_comp_120,
+                    rs_comp_20, rs_comp_60, rs_comp_120, rs_comp_252,
                     dollar_volume, adr_pct, volume_dryup_ratio,
                     market_regime, market_score, regime_multiplier
                 ) VALUES (
@@ -416,11 +408,11 @@ def _write_records(db_path: str, scan_records: list, outcome_records: list):
                     :base_quality, :trend_strength, :relative_strength_score,
                     :volume_score, :rr_score,
                     :price, :breakout_level, :stop_level, :target_level,
-                    :stop_distance_pct, :potential_r,
+                    :stop_distance_pct, :stop_distance_20d_pct, :potential_r,
                     :consol_days, :consol_range_pct,
                     :vcp_contracting, :vcp_contraction_ratio,
                     :stage2, :pct_from_52wk_high, :ma_alignment, :prior_move_pct,
-                    :rs_comp_20, :rs_comp_60, :rs_comp_120,
+                    :rs_comp_20, :rs_comp_60, :rs_comp_120, :rs_comp_252,
                     :dollar_volume, :adr_pct, :volume_dryup_ratio,
                     :market_regime, :market_score, :regime_multiplier
                 )
@@ -449,26 +441,26 @@ def _score_symbol(
     compx_df: pd.DataFrame,
     scan_start: pd.Timestamp,
     scan_end: pd.Timestamp,
-    features: Features,
-    scoring: Scoring,
-    db_path: str,
     config: dict,
+    existing_dates: set[str],
     force_rescore: bool = False,
-) -> tuple[int, int]:
+) -> tuple[list, list]:
     pkl_path = HISTORY_DIR / f"{symbol}-full.pkl"
     if not pkl_path.exists():
-        return 0, 0
+        return [], []
 
     with open(pkl_path, "rb") as f:
         df = pickle.load(f)
 
     if len(df) < 100:
-        return 0, 0
+        return [], []
 
-    # force_rescore ignores existing records so failing rows get backfilled on re-runs
-    existing = set() if force_rescore else _existing_scan_dates(db_path, symbol)
+    features = Features(config)
+    scoring = Scoring(config)
+    scoring.regime_multiplier = 1.0
+
+    actual_existing = set() if force_rescore else existing_dates
     feature_df = features.add_all_features(df, compx_df)
-
     scan_window = feature_df.loc[
         (feature_df.index >= scan_start) & (feature_df.index <= scan_end)
     ]
@@ -478,18 +470,13 @@ def _score_symbol(
 
     for date, row in scan_window.iterrows():
         date_str = date.strftime("%Y-%m-%d")
-        if date_str in existing:
+        if date_str in actual_existing:
             continue
 
         passes, _ = scoring.apply_hard_filters(row)
-
-        # score every stock regardless of filter result — failing records are saved
-        # with passes_filters=0 so the optimizer can analyze filter boundary effects
         breakdown = scoring.calculate_total_score(row, rs_rank=None)
         scan_records.append(_build_scan_record(date_str, symbol, row, breakdown, config, passes))
 
-        # outcomes use next-day open as entry price, not scan-day close.
-        # scan-day close is unknowable at signal time (scan runs after market close).
         idx = feature_df.index.get_loc(date)
         future_rows = df.iloc[idx + 1:]
         if not future_rows.empty:
@@ -499,10 +486,7 @@ def _score_symbol(
                 if outcome:
                     outcome_records.append(outcome)
 
-    if scan_records or outcome_records:
-        _write_records(db_path, scan_records, outcome_records)
-
-    return len(scan_records), len(outcome_records)
+    return scan_records, outcome_records
 
 
 # ── phase 2: score ────────────────────────────────────────────────────────────
@@ -514,12 +498,12 @@ def phase2_score(
     db_path: str,
     config: dict,
     force_rescore: bool = False,
+    workers: int = 4,
 ):
     from ingestion import SchwabAPIClient
 
-    print(f"\nphase 2 — score + outcomes")
+    print(f"\nphase 2 — score + outcomes  (workers={workers})")
 
-    # fetch compx covering full scan range + warmup buffer
     buffer_start = scan_start - timedelta(days=400)
     start_ts = int(buffer_start.timestamp() * 1000)
     end_ts = int(scan_end.timestamp() * 1000)
@@ -528,143 +512,128 @@ def phase2_score(
     compx_df = SchwabAPIClient().get_index_data("$COMPX", start_ts, end_ts)
     print(f"  compx: {len(compx_df)} bars ({compx_df.index[0].date()} → {compx_df.index[-1].date()})")
 
-    features = Features(config)
-    scoring = Scoring(config)
-    scoring.regime_multiplier = 1.0  # no regime gating for historical data
-
     available = {p.stem.split("-")[0] for p in HISTORY_DIR.glob("*-full.pkl")}
     to_score = [s for s in symbols if s in available]
 
     trading_days = max(1, (scan_end - scan_start).days * 5 // 7)
-    estimated_rows = len(to_score) * trading_days
-    print(f"  {len(to_score)} symbols to score")
-    print(f"  estimated records: ~{estimated_rows:,} (all stocks, passing + failing)")
-    print(f"  NOTE: failing stocks are now saved (passes_filters=0) for filter analysis.")
-    print(f"        DB may grow significantly. use --skip-scoring to skip if not needed.")
+    print(f"  {len(to_score)} symbols to score  (~{len(to_score) * trading_days:,} estimated rows)")
     if force_rescore:
-        print(f"  force-rescore: ignoring existing records, re-processing all dates")
+        print("  force-rescore: re-processing all dates")
 
-    total_scans    = 0
-    total_outcomes = 0
-    total_passing  = 0
+    # single query to pre-load all existing dates — avoids N per-symbol db round-trips
+    existing_all: dict[str, set[str]] = {}
+    if not force_rescore:
+        print("  loading existing records from db...")
+        with sqlite3.connect(db_path) as conn:
+            for sym, date in conn.execute("SELECT symbol, scan_date FROM scans"):
+                existing_all.setdefault(sym, set()).add(date)
+        n_existing = sum(len(v) for v in existing_all.values())
+        print(f"  {n_existing:,} existing records across {len(existing_all):,} symbols")
 
-    for i, symbol in enumerate(to_score, 1):
-        try:
-            n_scans, n_outcomes = _score_symbol(
-                symbol, compx_df, scan_start, scan_end, features, scoring, db_path, config,
-                force_rescore=force_rescore,
-            )
-            total_scans    += n_scans
-            total_outcomes += n_outcomes
-        except Exception:
-            pass
+    write_lock = threading.Lock()
+    batch_scans: list = []
+    batch_outcomes: list = []
+    BATCH_SIZE = 5_000
+    counters = {"scans": 0, "outcomes": 0}
 
-        if i % 50 == 0 or i == len(to_score):
-            print(
-                f"  [{i}/{len(to_score)}] scans={total_scans:,} outcomes={total_outcomes:,}",
-                end="\r", flush=True,
-            )
+    def _flush():
+        _write_records(db_path, batch_scans, batch_outcomes)
+        batch_scans.clear()
+        batch_outcomes.clear()
 
-    print(f"\n  done: {total_scans:,} scan records, {total_outcomes:,} outcome records")
+    def _process(symbol: str) -> None:
+        scans, outcomes = _score_symbol(
+            symbol, compx_df, scan_start, scan_end, config,
+            existing_all.get(symbol, set()), force_rescore,
+        )
+        if not scans and not outcomes:
+            return
+        with write_lock:
+            batch_scans.extend(scans)
+            batch_outcomes.extend(outcomes)
+            counters["scans"] += len(scans)
+            counters["outcomes"] += len(outcomes)
+            if len(batch_scans) >= BATCH_SIZE:
+                _flush()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_process, sym): sym for sym in to_score}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                future.result()
+            except Exception:
+                pass
+            if i % 50 == 0 or i == len(to_score):
+                print(
+                    f"  [{i}/{len(to_score)}] scans={counters['scans']:,} outcomes={counters['outcomes']:,}",
+                    end="\r", flush=True,
+                )
+
+    with write_lock:
+        _flush()
+
+    print(f"\n  done: {counters['scans']:,} scan records, {counters['outcomes']:,} outcome records")
 
 
 # ── phase 3: rs rank calibration ─────────────────────────────────────────────
 
 def phase3_rs_calibration(db_path: str, min_alert: float = 80, min_watch: float = 70):
-    """
-    Compute cross-sectional RS percentile rank across the FULL downloaded universe
-    (passing + failing stocks) so the rank reflects genuine market leadership, not
-    just rank-within-the-already-filtered-set.
-
-    Thresholds match the live engine (engine.py score_relative_strength):
-      95th+  -> 8 pts  (very top is often distribution, not accumulation)
-      85-95th -> 10 pts (sweet spot: leaders before the crowd finds them)
-      75-85th ->  7 pts
-      65-75th ->  4 pts
-      <65th   ->  0 pts
-
-    Both passing and failing records get their relative_strength_score and
-    raw_score updated. The passes_filters column remains the source of truth
-    for which records the backtester and optimizer should trade.
-    """
     print(f"\nphase 3 — rs rank calibration (full universe)")
 
     with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA cache_size=-131072")  # 128mb page cache for sequential reads
+        conn.execute("PRAGMA synchronous=NORMAL")
+
         dates = [
-            r[0]
-            for r in conn.execute(
-                # calibrate on any date that has at least one filter-passing record
-                # so we don't waste time on dates with only non-tradeable stocks
+            r[0] for r in conn.execute(
                 "SELECT DISTINCT scan_date FROM scans WHERE passes_filters = 1 ORDER BY scan_date"
             ).fetchall()
         ]
 
-    print(f"  calibrating {len(dates)} scan dates across full downloaded universe...")
-    updated = 0
+        if not dates:
+            print("  no qualifying dates found")
+            return
 
-    for date_str in dates:
-        with sqlite3.connect(db_path) as conn:
-            # query ALL records for this date — passing + failing — to build the universe
+        print(f"  calibrating {len(dates)} scan dates across full downloaded universe...")
+
+        all_updates = []
+        for date_str in dates:
             rows = conn.execute(
-                """SELECT id, rs_comp_60, relative_strength_score, raw_score, passes_filters
-                   FROM scans
-                   WHERE scan_date = ? AND rs_comp_60 IS NOT NULL""",
+                "SELECT id, rs_comp_60, relative_strength_score, raw_score FROM scans WHERE scan_date = ? AND rs_comp_60 IS NOT NULL",
                 (date_str,),
             ).fetchall()
 
-        if len(rows) < 2:
-            continue
+            if len(rows) < 2:
+                continue
 
-        ids           = [r[0] for r in rows]
-        rs_values     = pd.Series([r[1] for r in rows], dtype=float)
-        rs_scores     = np.array([r[2] for r in rows], dtype=float)
-        raw_scores    = np.array([r[3] for r in rows], dtype=float)
-        passes_flags  = [bool(r[4]) for r in rows]
+            ids        = [r[0] for r in rows]
+            rs_values  = np.array([r[1] for r in rows], dtype=float)
+            rs_scores  = np.array([r[2] for r in rows], dtype=float)
+            raw_scores = np.array([r[3] for r in rows], dtype=float)
 
-        # rank against the full universe — a stock at the 90th percentile of
-        # 4,000 NASDAQ stocks means far more than 90th of 2 filter-passing stocks
-        percentiles = rs_values.rank(pct=True, method="average") * 100
-
-        updates = []
-        for i, (row_id, pct) in enumerate(zip(ids, percentiles)):
-            # mirror engine.py score_relative_strength exactly
-            if pct >= 95:
-                rank_pts = 8.0    # top bucket penalized: distribution risk at the pivot
-            elif pct >= 85:
-                rank_pts = 10.0   # sweet spot: leaders before the crowd finds them
-            elif pct >= 75:
-                rank_pts = 7.0
-            elif pct >= 65:
-                rank_pts = 4.0
-            else:
-                rank_pts = 0.0
-
-            new_rs    = rs_scores[i] + rank_pts
-            new_raw   = raw_scores[i] + rank_pts
-            new_score = new_raw   # regime_multiplier = 1.0 for all historical records
-
-            updates.append((
-                new_rs, new_raw, new_score,
-                _grade(new_raw),
-                _signal(new_score, min_alert, min_watch),
-                row_id,
-            ))
-
-        with sqlite3.connect(db_path) as conn:
-            conn.executemany(
-                """UPDATE scans
-                   SET relative_strength_score = ?,
-                       raw_score = ?,
-                       score = ?,
-                       grade = ?,
-                       signal = ?
-                   WHERE id = ?""",
-                updates,
+            pcts = pd.Series(rs_values).rank(pct=True, method="average").values * 100
+            rank_pts = np.select(
+                [pcts >= 95, pcts >= 85, pcts >= 75, pcts >= 65],
+                [8.0, 10.0, 7.0, 4.0],
+                default=0.0,
             )
 
-        updated += len(updates)
+            new_rs    = rs_scores + rank_pts
+            new_raw   = raw_scores + rank_pts
+            new_score = new_raw  # regime_multiplier = 1.0 for all historical records
 
-    print(f"  updated {updated:,} records with full-universe cross-sectional rs rank")
+            all_updates.extend(
+                (float(new_rs[i]), float(new_raw[i]), float(new_score[i]),
+                 _grade(new_raw[i]), _signal(new_score[i], min_alert, min_watch), row_id)
+                for i, row_id in enumerate(ids)
+            )
+
+        conn.executemany(
+            "UPDATE scans SET relative_strength_score=?, raw_score=?, score=?, grade=?, signal=? WHERE id=?",
+            all_updates,
+        )
+
+    print(f"  updated {len(all_updates):,} records with full-universe cross-sectional rs rank")
 
 
 # ── phase 4: backfill market conditions ──────────────────────────────────────
@@ -836,12 +805,17 @@ def main():
     # ensure db schema is initialized
     ScanPersistence(DB_PATH)
 
+    # WAL mode + relaxed sync for batch writes — survives process kill, not OS crash
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+
     if not args.skip_download:
         phase1_download(symbols, start_ts, end_ts, args.workers, args.delay, args.force_download)
 
     if not args.skip_scoring:
         phase2_score(symbols, scan_start, scan_end, DB_PATH, config,
-                     force_rescore=args.force_rescore)
+                     force_rescore=args.force_rescore, workers=args.workers)
 
     if not args.skip_rs_calibration:
         phase3_rs_calibration(

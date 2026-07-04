@@ -16,19 +16,24 @@ def rerun_all_dates(engine, db, debug=False, dry_run=False):
         print("data/ directory not found. Nothing to rerun.")
         return
 
-    date_dirs = sorted([
-        d for d in data_root.iterdir()
-        if d.is_dir()
-        and re.match(r'^\d{4}-\d{2}-\d{2}$', d.name)
-        and any(d.glob("*.pkl"))
-    ])
+    date_dirs = sorted(
+        [
+            d
+            for d in data_root.iterdir()
+            if d.is_dir()
+            and re.match(r"^\d{4}-\d{2}-\d{2}$", d.name)
+            and any(d.glob("*.pkl"))
+        ]
+    )
 
     if not date_dirs:
         print("No scan data found in data/. Nothing to rerun.")
         return
 
-    print(f"Found {len(date_dirs)} scan date(s): "
-          f"{date_dirs[0].name} → {date_dirs[-1].name}")
+    print(
+        f"Found {len(date_dirs)} scan date(s): "
+        f"{date_dirs[0].name} → {date_dirs[-1].name}"
+    )
 
     print("\nFetching benchmark data (once for all dates)...")
     try:
@@ -36,9 +41,13 @@ def rerun_all_dates(engine, db, debug=False, dry_run=False):
         full_compx = engine.benchmark_df
         full_spy = engine.spy_df
         full_iwm = engine.iwm_df
-        print(f"  COMPX spans {full_compx.index[0].date()} → {full_compx.index[-1].date()}\n")
+        print(
+            f"  COMPX spans {full_compx.index[0].date()} → {full_compx.index[-1].date()}\n"
+        )
     except Exception as e:
-        print(f"Warning: benchmark unavailable ({e}) — regime_multiplier=1.0 for all dates\n")
+        print(
+            f"Warning: benchmark unavailable ({e}) — regime_multiplier=1.0 for all dates\n"
+        )
         full_compx = full_spy = full_iwm = None
 
     # suppress per-date regime report walls; one compact line per date is enough
@@ -71,7 +80,9 @@ def rerun_all_dates(engine, db, debug=False, dry_run=False):
             symbol = pf.stem.split("-")[0]
             try:
                 df = engine.load_pickle(str(pf))
-                if "datetime" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+                if "datetime" in df.columns and not isinstance(
+                    df.index, pd.DatetimeIndex
+                ):
                     df["datetime"] = pd.to_datetime(df["datetime"], unit="ms")
                     df = df.set_index("datetime")
                     df.index = df.index.normalize()
@@ -112,8 +123,10 @@ def rerun_all_dates(engine, db, debug=False, dry_run=False):
         mult_label = f"×{regime_mult:.2f}"
 
         if dry_run:
-            print(f"  {date_str}: {len(final_scored_dfs)} stocks  "
-                  f"regime={mc_label} {mult_label}  [dry-run]")
+            print(
+                f"  {date_str}: {len(final_scored_dfs)} stocks  "
+                f"regime={mc_label} {mult_label}  [dry-run]"
+            )
         else:
             n = db.save_scan(date_str, final_scored_dfs, mc)
             print(f"  {date_str}: {n} stocks saved  regime={mc_label} {mult_label}")
@@ -121,9 +134,13 @@ def rerun_all_dates(engine, db, debug=False, dry_run=False):
 
     print()
     if dry_run:
-        print(f"[dry-run] Would rerun {len(date_dirs)} date(s) with current scoring code.")
+        print(
+            f"[dry-run] Would rerun {len(date_dirs)} date(s) with current scoring code."
+        )
     else:
-        print(f"Rerun complete — {total_saved} stock records updated across {len(date_dirs)} date(s).")
+        print(
+            f"Rerun complete — {total_saved} stock records updated across {len(date_dirs)} date(s)."
+        )
         db.summary()
 
 
@@ -182,6 +199,7 @@ def main():
         if paper_cfg.get("enabled") and not args.no_paper:
             try:
                 from paper_trader import AlpacaClient, PaperTradeManager
+
                 manager = PaperTradeManager(AlpacaClient(), db, PARAMETERS)
                 manager.run(args.date, scored_dfs, eg.market_condition, eg.macro_regime)
             except EnvironmentError as exc:
